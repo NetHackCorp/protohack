@@ -25,9 +25,154 @@
 #define PROTOHACK_EXE_EXTENSION ".bin"
 #endif
 
-static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [--run] [--exe] [-o output.phc] [--exe-out output%s] [--runner path] <source.phk>\n",
-            prog, PROTOHACK_EXE_EXTENSION);
+static void usage(FILE *stream, const char *prog) {
+    if (!stream) {
+        stream = stderr;
+    }
+    fprintf(stream, "Protohack compiler %s\n", PROTOHACK_VERSION);
+    fprintf(stream, "Usage: %s [options] <source.phk>\n\n", prog ? prog : "protohackc");
+    fprintf(stream, "Options:\n");
+    fprintf(stream, "  -o <file>             Write compiled bytecode to <file> (defaults to source with %s).\n", PROTOHACK_PHC_EXTENSION);
+    fprintf(stream, "  --run                 Execute the program immediately after compilation.\n");
+    fprintf(stream, "  --exe                 Bundle the program with the runner stub into a standalone executable.\n");
+    fprintf(stream, "  --exe-out <file>      Custom output path for the bundled executable.\n");
+    fprintf(stream, "  --runner <file>       Override the runner stub used when --exe is set.\n");
+#if PROTOHACK_ENABLE_JIT
+    fprintf(stream, "  --jit-profile         Execute with the JIT profiler enabled and print statistics.\n");
+#endif
+    fprintf(stream, "  --version             Print the compiler version and exit.\n");
+    fprintf(stream, "  --help                Show this message and exit.\n");
+}
+
+static void print_version(void) {
+    printf("protohackc %s\n", PROTOHACK_VERSION);
+}
+
+static void find_line_bounds(const char *source, size_t target_line, const char **out_start, const char **out_end) {
+    if (!out_start || !out_end) {
+        return;
+    }
+    *out_start = NULL;
+    *out_end = NULL;
+    if (!source || target_line == 0) {
+        return;
+    }
+
+    const char *line_start = source;
+    size_t current_line = 1;
+    for (const char *cursor = source; *cursor != '\0'; ++cursor) {
+        if (current_line == target_line) {
+            break;
+        }
+        if (*cursor == '\n') {
+            current_line++;
+            line_start = cursor + 1;
+        }
+    }
+
+    if (current_line != target_line) {
+        return;
+    }
+
+    const char *line_end = line_start;
+    while (*line_end != '\0' && *line_end != '\n') {
+        ++line_end;
+    }
+
+    *out_start = line_start;
+    *out_end = line_end;
+}
+
+static void print_source_fragment(const char *line_start, const char *line_end) {
+    if (!line_start || !line_end) {
+        return;
+    }
+    const size_t kTabWidth = 4;
+    for (const char *cursor = line_start; cursor < line_end; ++cursor) {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch == '\t') {
+            for (size_t i = 0; i < kTabWidth; ++i) {
+                fputc(' ', stderr);
+            }
+        } else if (ch < 32 && ch != '\t') {
+            fputc(' ', stderr);
+        } else {
+            fputc(ch, stderr);
+        }
+    }
+}
+
+static size_t caret_visual_offset(const char *line_start, const char *line_end, size_t caret_index) {
+    const size_t kTabWidth = 4;
+    size_t offset = 0;
+    size_t max_index = (size_t)(line_end > line_start ? (line_end - line_start) : 0);
+    if (caret_index > max_index) {
+        caret_index = max_index;
+    }
+    for (size_t i = 0; i < caret_index && line_start + i < line_end; ++i) {
+        unsigned char ch = (unsigned char)line_start[i];
+        if (ch == '\t') {
+            offset += kTabWidth;
+        } else if (ch < 32 && ch != '\t') {
+            offset += 1;
+        } else {
+            offset += 1;
+        }
+    }
+    return offset;
+}
+
+static void print_error_with_context(const char *phase, const char *path, const ProtoError *error, const char *source) {
+    if (!error) {
+        return;
+    }
+
+    const char *label = phase ? phase : "Error";
+    if (path && error->line > 0) {
+        if (error->column > 0) {
+            fprintf(stderr, "%s:%zu:%zu: %s: %s\n", path, error->line, error->column, label, error->message);
+        } else {
+            fprintf(stderr, "%s:%zu: %s: %s\n", path, error->line, label, error->message);
+        }
+    } else if (error->line > 0) {
+        if (error->column > 0) {
+            fprintf(stderr, "line %zu, column %zu: %s: %s\n", error->line, error->column, label, error->message);
+        } else {
+            fprintf(stderr, "line %zu: %s: %s\n", error->line, label, error->message);
+        }
+    } else {
+        fprintf(stderr, "%s: %s\n", label, error->message);
+    }
+
+    if (!source || error->line == 0) {
+        return;
+    }
+
+    const char *line_start = NULL;
+    const char *line_end = NULL;
+    find_line_bounds(source, error->line, &line_start, &line_end);
+    if (!line_start || !line_end) {
+        return;
+    }
+
+    if (line_end > line_start && line_end[-1] == '\r') {
+        line_end--;
+    }
+
+    fprintf(stderr, " %6zu | ", error->line);
+    print_source_fragment(line_start, line_end);
+    fprintf(stderr, "\n");
+
+    if (error->column > 0) {
+        size_t caret_index = error->column > 0 ? error->column - 1 : 0;
+        size_t visual = caret_visual_offset(line_start, line_end, caret_index);
+        fprintf(stderr, " %6s | ", "");
+        for (size_t i = 0; i < visual; ++i) {
+            fputc(' ', stderr);
+        }
+        fputc('^', stderr);
+        fprintf(stderr, "\n");
+    }
 }
 
 static bool get_self_path(char *buffer, size_t size, const char *argv0) {
@@ -159,6 +304,13 @@ int main(int argc, char **argv) {
     bool exe_output_allocated = false;
     const char *runner_path = NULL;
     bool runner_allocated = false;
+    bool show_help = false;
+    bool show_version = false;
+#if PROTOHACK_ENABLE_JIT
+    bool dump_jit_profile = false;
+#else
+    const bool dump_jit_profile = false;
+#endif
 
     char self_path[4096] = {0};
     bool have_self_path = get_self_path(self_path, sizeof self_path, (argc > 0) ? argv[0] : NULL);
@@ -170,7 +322,7 @@ int main(int argc, char **argv) {
             emit_executable = true;
         } else if (strcmp(argv[i], "--exe-out") == 0) {
             if (i + 1 >= argc) {
-                usage(argv[0]);
+                usage(stderr, argv[0]);
                 return EXIT_FAILURE;
             }
             exe_output_path = argv[++i];
@@ -178,28 +330,53 @@ int main(int argc, char **argv) {
             emit_executable = true;
         } else if (strcmp(argv[i], "--runner") == 0) {
             if (i + 1 >= argc) {
-                usage(argv[0]);
+                usage(stderr, argv[0]);
                 return EXIT_FAILURE;
             }
             runner_path = argv[++i];
             runner_allocated = false;
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) {
-                usage(argv[0]);
+                usage(stderr, argv[0]);
                 return EXIT_FAILURE;
             }
             output_path = argv[++i];
             output_allocated = false;
+#if PROTOHACK_ENABLE_JIT
+        } else if (strcmp(argv[i], "--jit-profile") == 0) {
+            dump_jit_profile = true;
+#endif
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            show_help = true;
+        } else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0) {
+            show_version = true;
         } else if (!input_path) {
             input_path = argv[i];
         } else {
-            usage(argv[0]);
+            usage(stderr, argv[0]);
             return EXIT_FAILURE;
         }
     }
 
+#if !PROTOHACK_ENABLE_JIT
+    if (dump_jit_profile) {
+        fprintf(stderr, "%s: --jit-profile requires building protohackc with JIT support.\n", argv[0] ? argv[0] : "protohackc");
+        return EXIT_FAILURE;
+    }
+#endif
+
+    if (show_version) {
+        print_version();
+        return EXIT_SUCCESS;
+    }
+
+    if (show_help) {
+        usage(stdout, argv[0]);
+        return EXIT_SUCCESS;
+    }
+
     if (!input_path) {
-        usage(argv[0]);
+        usage(stderr, argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -239,6 +416,12 @@ int main(int argc, char **argv) {
         runner_allocated = true;
     }
 
+#if PROTOHACK_ENABLE_JIT
+    if (dump_jit_profile) {
+        run_after_compile = true;
+    }
+#endif
+
     source = read_file(input_path, &source_size);
     if (!source) {
         fprintf(stderr, "Unable to read source file '%s'.\n", input_path);
@@ -249,8 +432,8 @@ int main(int argc, char **argv) {
     chunk_initialized = true;
     protoerror_reset(&error);
 
-    if (!protohack_compile_source(source, &chunk, &error)) {
-        fprintf(stderr, "Compilation failed (line %zu): %s\n", error.line, error.message);
+    if (!protohack_compile_source(source, input_path, &chunk, &error)) {
+        print_error_with_context("compilation error", input_path, &error, source);
         goto cleanup;
     }
 
@@ -258,6 +441,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to write bytecode: %s\n", error.message);
         goto cleanup;
     }
+    printf("Wrote bytecode to %s\n", output_path);
 
     if (emit_executable) {
         protoerror_reset(&error);
@@ -265,15 +449,26 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Failed to build executable '%s': %s\n", exe_output_path, error.message);
             goto cleanup;
         }
+        printf("Wrote executable to %s\n", exe_output_path);
     }
 
     if (run_after_compile) {
         ProtoVM vm;
         protovm_init(&vm);
         if (!protovm_run(&vm, &chunk, &error)) {
-            fprintf(stderr, "Runtime error (line %zu): %s\n", error.line, error.message);
+            print_error_with_context("runtime error", input_path, &error, source);
             goto cleanup;
         }
+#if PROTOHACK_ENABLE_JIT
+        if (dump_jit_profile) {
+            const ProtoJITProfiler *profiler = protovm_profiler(&vm);
+            if (profiler) {
+                protojit_profiler_dump(profiler, stdout);
+            } else {
+                fprintf(stderr, "JIT profiler data unavailable.\n");
+            }
+        }
+#endif
     }
 
     exit_code = EXIT_SUCCESS;
