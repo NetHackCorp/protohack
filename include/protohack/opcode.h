@@ -1,0 +1,43 @@
+#ifndef PROTOHACK_OPCODE_H
+#define PROTOHACK_OPCODE_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    PROTO_OP_CONSTANT = 0,
+    PROTO_OP_TRUE,
+    PROTO_OP_FALSE,
+    PROTO_OP_NULL,
+    PROTO_OP_GET_GLOBAL,
+    PROTO_OP_SET_GLOBAL,
+    PROTO_OP_ADD,
+    PROTO_OP_SUB,
+    PROTO_OP_MUL,
+    PROTO_OP_DIV,
+    PROTO_OP_NEGATE,
+    PROTO_OP_NOT,
+    PROTO_OP_EQUAL,
+    PROTO_OP_GREATER,
+    PROTO_OP_LESS,
+    PROTO_OP_PRINT,
+    PROTO_OP_POP,
+    PROTO_OP_JUMP,
+    PROTO_OP_JUMP_IF_FALSE,
+    PROTO_OP_LOOP,
+    PROTO_OP_CALL_NATIVE,
+    PROTO_OP_GET_LOCAL,
+    PROTO_OP_SET_LOCAL,
+    PROTO_OP_CALL,
+    PROTO_OP_ALLOC_TYPED,
+    PROTO_OP_STORE_TYPED,
+    PROTO_OP_LOAD_TYPED,
+    PROTO_OP_RETURN
+} ProtoOpCode;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

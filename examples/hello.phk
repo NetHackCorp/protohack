@@ -1,0 +1,15 @@
+// Protohack 0.2.0 demonstration
+const name = "Protohack";
+let echoes = 3;
+let index = 0;
+
+println("Launching " + name + "...");
+
+while (index < echoes) {
+    println("[" + to_string(index) + "] " + upper(name) + " ready!");
+    index = index + 1;
+}
+
+
+print "Total echoes:";
+print echoes;

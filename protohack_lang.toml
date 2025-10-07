@@ -1,0 +1,7 @@
+name = "protohack"
+version = "0.2.0"
+author = "Protohack Labs"
+description = "A middle-level ethical hacking language with control flow, strings, and a native stdlib."
+compiler = "protohackc"
+bytecode_extension = "phc"
+source_extension = "phk"
