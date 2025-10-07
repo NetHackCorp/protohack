@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-bool protohack_compile_source(const char *source, ProtoChunk *chunk, ProtoError *error);
+bool protohack_compile_source(const char *source, const char *origin_path, ProtoChunk *chunk, ProtoError *error);
 
 #ifdef __cplusplus
 }
