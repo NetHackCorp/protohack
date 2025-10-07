@@ -1,0 +1,59 @@
+{
+  "name": "protohack-intellisense",
+  "displayName": "Protohack IntelliSense",
+  "description": "Adds completion, hover, and signature help for the Protohack language.",
+  "version": "0.1.0",
+  "publisher": "nethackcorp",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:protohack"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "protohack",
+        "aliases": [
+          "Protohack",
+          "protohack"
+        ],
+        "extensions": [
+          ".phk",
+          ".phc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "protohack",
+        "scopeName": "source.protohack",
+        "path": "./syntaxes/protohack.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "lint": "tsc --noEmit -p ./",
+    "package": "npx @vscode/vsce package",
+    "test": "npm run compile && node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.1",
+    "@types/node": "^20.9.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.3.5",
+    "@vscode/vsce": "^2.15.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.2"
+  }
+}
