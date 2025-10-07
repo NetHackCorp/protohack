@@ -14,5 +14,11 @@
 #include "protohack/vm.h"
 #include "protohack/serialize.h"
 #include "protohack/executable.h"
+#include "protohack/jit.h"
+#include "protohack/jit_block.h"
+#include "protohack/jit_ir.h"
+#include "protohack/stdlib/file_crypto.h"
+#include "protohack/stdlib/complex_math.h"
+#include "protohack/stdlib/network.h"
 
 #endif
