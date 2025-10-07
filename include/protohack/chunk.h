@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+struct ProtoJITIR;
+
 typedef struct ProtoChunk {
     uint8_t *code;
     size_t code_count;
@@ -27,6 +29,11 @@ typedef struct ProtoChunk {
     size_t *lines;
     size_t lines_count;
     size_t lines_capacity;
+
+#if PROTOHACK_ENABLE_JIT
+    struct ProtoJITIR **jit_cache;
+    size_t jit_cache_count;
+#endif
 } ProtoChunk;
 
 void protochunk_init(ProtoChunk *chunk);
