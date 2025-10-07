@@ -5,6 +5,25 @@
 
 #include "protohack/internal/common.h"
 #include "protohack/function.h"
+#if PROTOHACK_ENABLE_JIT
+#include "protohack/jit_ir.h"
+#endif
+
+#if PROTOHACK_ENABLE_JIT
+static void protochunk_free_jit_cache(ProtoChunk *chunk) {
+    if (!chunk || !chunk->jit_cache) {
+        return;
+    }
+    for (size_t i = 0; i < chunk->jit_cache_count; ++i) {
+        if (chunk->jit_cache[i]) {
+            protojit_ir_free(chunk->jit_cache[i]);
+        }
+    }
+    free(chunk->jit_cache);
+    chunk->jit_cache = NULL;
+    chunk->jit_cache_count = 0;
+}
+#endif
 
 void protochunk_init(ProtoChunk *chunk) {
     if (!chunk) {
@@ -25,6 +44,11 @@ void protochunk_init(ProtoChunk *chunk) {
     chunk->lines = NULL;
     chunk->lines_count = 0;
     chunk->lines_capacity = 0;
+
+#if PROTOHACK_ENABLE_JIT
+    chunk->jit_cache = NULL;
+    chunk->jit_cache_count = 0;
+#endif
 }
 
 void protochunk_free(ProtoChunk *chunk) {
@@ -65,6 +89,10 @@ void protochunk_free(ProtoChunk *chunk) {
     chunk->lines = NULL;
     chunk->lines_count = 0;
     chunk->lines_capacity = 0;
+
+#if PROTOHACK_ENABLE_JIT
+    protochunk_free_jit_cache(chunk);
+#endif
 }
 
 size_t protochunk_add_constant(ProtoChunk *chunk, ProtoValue value) {
@@ -84,6 +112,10 @@ size_t protochunk_add_string(ProtoChunk *chunk, const char *value, size_t length
 void protochunk_write(ProtoChunk *chunk, uint8_t byte, size_t line) {
     ENSURE_CAPACITY(chunk->code, chunk->code_count, chunk->code_capacity, uint8_t);
     ENSURE_CAPACITY(chunk->lines, chunk->lines_count, chunk->lines_capacity, size_t);
+
+#if PROTOHACK_ENABLE_JIT
+    protochunk_free_jit_cache(chunk);
+#endif
 
     chunk->code[chunk->code_count++] = byte;
     chunk->lines[chunk->lines_count++] = line;
