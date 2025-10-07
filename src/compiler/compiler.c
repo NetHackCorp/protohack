@@ -1,11 +1,13 @@
 #include "protohack/compiler.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdio.h>
 
 #include "protohack/chunk.h"
 #include "protohack/config.h"
@@ -16,6 +18,20 @@
 #include "protohack/opcode.h"
 #include "protohack/types.h"
 #include "protohack/value.h"
+
+#define PROTOHACK_MAX_INCLUDE_DEPTH 32
+
+typedef struct IncludeBuffer {
+    char *data;
+    size_t length;
+    size_t capacity;
+} IncludeBuffer;
+
+static void includebuf_init(IncludeBuffer *buffer);
+static void includebuf_free(IncludeBuffer *buffer);
+static bool includebuf_append(IncludeBuffer *buffer, const char *data, size_t length);
+static bool preprocess_includes_into(const char *source, const char *origin_path, ProtoError *error, int depth, IncludeBuffer *output);
+static char *preprocess_includes(const char *source, const char *origin_path, ProtoError *error);
 
 typedef enum {
     TOKEN_LEFT_PAREN,
@@ -57,6 +73,7 @@ typedef enum {
     TOKEN_WHILE,
     TOKEN_CONST,
     TOKEN_CRAFT,
+    TOKEN_CLASS,
     TOKEN_CALL,
     TOKEN_GIVES,
     TOKEN_YIELD,
@@ -69,6 +86,7 @@ typedef enum {
     TOKEN_CARVE,
     TOKEN_ETCH,
     TOKEN_PROBE,
+    TOKEN_THIS,
     TOKEN_EOF,
     TOKEN_ERROR
 } TokenType;
@@ -81,12 +99,14 @@ typedef struct {
 } Token;
 
 typedef struct {
+    const char *source;
     const char *start;
     const char *current;
     size_t line;
 } Scanner;
 
 static void scanner_init(Scanner *scanner, const char *source) {
+    scanner->source = source;
     scanner->start = source;
     scanner->current = source;
     scanner->line = 1;
@@ -194,6 +214,9 @@ static TokenType scanner_identifier_type(const Token *token) {
             if (token->length == 5 && memcmp(token->start, "craft", 5) == 0) {
                 return TOKEN_CRAFT;
             }
+            if (token->length == 5 && memcmp(token->start, "class", 5) == 0) {
+                return TOKEN_CLASS;
+            }
             if (token->length == 4 && memcmp(token->start, "call", 4) == 0) {
                 return TOKEN_CALL;
             }
@@ -261,6 +284,9 @@ static TokenType scanner_identifier_type(const Token *token) {
             }
             if (token->length == 4 && memcmp(token->start, "text", 4) == 0) {
                 return TOKEN_TEXT;
+            }
+            if (token->length == 4 && memcmp(token->start, "this", 4) == 0) {
+                return TOKEN_THIS;
             }
             break;
         case 'w':
@@ -410,6 +436,11 @@ typedef struct CompilerContext {
     struct CompilerContext *enclosing;
 } CompilerContext;
 
+typedef struct ClassCompiler {
+    Token name;
+    struct ClassCompiler *enclosing;
+} ClassCompiler;
+
 typedef struct Parser {
     Scanner scanner;
     Token current;
@@ -425,6 +456,7 @@ typedef struct Parser {
     int initializing_global;
     CompilerContext *compiler;
     CompilerContext root;
+    ClassCompiler *current_class;
 } Parser;
 
 static void parser_advance(Parser *parser);
@@ -449,10 +481,15 @@ static void parse_call_keyword(Parser *parser, bool can_assign);
 static void parse_carve(Parser *parser, bool can_assign);
 static void parse_probe(Parser *parser, bool can_assign);
 static void craft_declaration(Parser *parser);
+static void class_declaration(Parser *parser);
+static void method_declaration(Parser *parser, Token class_name);
 static void parse_function_body(Parser *parser, ProtoFunction *function);
 static void yield_statement(Parser *parser);
 static void etch_statement(Parser *parser);
 static void sync_function_globals(Parser *parser, ProtoChunk *chunk);
+static bool token_to_identifier(const Token *token, char *buffer, size_t buffer_size);
+static void parse_this(Parser *parser, bool can_assign);
+static void parse_dot(Parser *parser, bool can_assign);
 
 static void parser_init(Parser *parser, const char *source, ProtoChunk *chunk, ProtoError *error) {
     scanner_init(&parser->scanner, source);
@@ -470,6 +507,481 @@ static void parser_init(Parser *parser, const char *source, ProtoChunk *chunk, P
     parser->root.expected_return = PROTO_TYPE_NONE;
     parser->root.enclosing = NULL;
     parser->compiler = &parser->root;
+    parser->current_class = NULL;
+}
+
+static void includebuf_init(IncludeBuffer *buffer) {
+    if (!buffer) {
+        return;
+    }
+    buffer->data = NULL;
+    buffer->length = 0;
+    buffer->capacity = 0;
+}
+
+static bool includebuf_reserve(IncludeBuffer *buffer, size_t additional) {
+    if (!buffer) {
+        return false;
+    }
+    size_t required = buffer->length + additional + 1;
+    if (required <= buffer->capacity) {
+        return true;
+    }
+    size_t new_capacity = buffer->capacity == 0 ? 256 : buffer->capacity;
+    while (new_capacity < required) {
+        new_capacity *= 2;
+    }
+    char *new_data = (char *)realloc(buffer->data, new_capacity);
+    if (!new_data) {
+        return false;
+    }
+    buffer->data = new_data;
+    buffer->capacity = new_capacity;
+    return true;
+}
+
+static bool includebuf_append(IncludeBuffer *buffer, const char *data, size_t length) {
+    if (!buffer || !data || length == 0) {
+        if (buffer && buffer->data) {
+            buffer->data[buffer->length] = '\0';
+        }
+        return true;
+    }
+    if (!includebuf_reserve(buffer, length)) {
+        return false;
+    }
+    memcpy(buffer->data + buffer->length, data, length);
+    buffer->length += length;
+    buffer->data[buffer->length] = '\0';
+    return true;
+}
+
+static void includebuf_free(IncludeBuffer *buffer) {
+    if (!buffer) {
+        return;
+    }
+    free(buffer->data);
+    buffer->data = NULL;
+    buffer->length = 0;
+    buffer->capacity = 0;
+}
+
+static bool is_path_separator(char c) {
+    return c == '/' || c == '\\';
+}
+
+static bool path_is_absolute(const char *path) {
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+#if defined(_WIN32)
+    if (isalpha((unsigned char)path[0]) && path[1] == ':' && is_path_separator(path[2])) {
+        return true;
+    }
+    if (is_path_separator(path[0]) && is_path_separator(path[1])) {
+        return true;
+    }
+    return false;
+#else
+    return path[0] == '/';
+#endif
+}
+
+static char *extract_directory(const char *path) {
+    if (!path || path[0] == '\0') {
+        return NULL;
+    }
+    const char *last_slash = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *last_backslash = strrchr(path, '\\');
+    if (!last_slash || (last_backslash && last_backslash > last_slash)) {
+        last_slash = last_backslash;
+    }
+#endif
+    if (!last_slash) {
+        return NULL;
+    }
+    size_t length = (size_t)(last_slash - path + 1);
+    return protohack_copy_string(path, length);
+}
+
+static char *join_path(const char *directory, const char *relative) {
+    if (!relative) {
+        return NULL;
+    }
+    if (!directory || directory[0] == '\0' || path_is_absolute(relative)) {
+        return protohack_copy_string(relative, strlen(relative));
+    }
+    size_t dir_length = strlen(directory);
+    bool has_sep = dir_length > 0 && is_path_separator(directory[dir_length - 1]);
+    size_t relative_length = strlen(relative);
+    size_t total = dir_length + (has_sep ? 0 : 1) + relative_length;
+    char *combined = (char *)malloc(total + 1);
+    if (!combined) {
+        return NULL;
+    }
+    memcpy(combined, directory, dir_length);
+    size_t index = dir_length;
+    if (!has_sep) {
+#if defined(_WIN32)
+        combined[index++] = '\\';
+#else
+        combined[index++] = '/';
+#endif
+    }
+    memcpy(combined + index, relative, relative_length);
+    combined[index + relative_length] = '\0';
+    return combined;
+}
+
+static size_t compute_column(const char *source, const char *position) {
+    if (!source || !position) {
+        return 0;
+    }
+    const char *cursor = position;
+    while (cursor > source && cursor[-1] != '\n') {
+        cursor--;
+    }
+    return (size_t)(position - cursor) + 1u;
+}
+
+static char *read_file_contents(const char *path, ProtoError *error, size_t line, size_t column) {
+    if (!path) {
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Include path is empty");
+        }
+        return NULL;
+    }
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Unable to open include file '%s'", path);
+        }
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Failed to read include file '%s'", path);
+        }
+        return NULL;
+    }
+    long size = ftell(file);
+    if (size < 0) {
+        fclose(file);
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Failed to determine size of include file '%s'", path);
+        }
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Failed to rewind include file '%s'", path);
+        }
+        return NULL;
+    }
+    char *buffer = (char *)malloc((size_t)size + 1);
+    if (!buffer) {
+        fclose(file);
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Out of memory while reading include '%s'", path);
+        }
+        return NULL;
+    }
+    size_t read = fread(buffer, 1, (size_t)size, file);
+    fclose(file);
+    if (read != (size_t)size) {
+        free(buffer);
+        if (error && error->ok) {
+            protoerror_set_with_column(error, line, column, "Failed to read include file '%s'", path);
+        }
+        return NULL;
+    }
+    buffer[size] = '\0';
+    return buffer;
+}
+
+static bool preprocess_includes_into(const char *source, const char *origin_path, ProtoError *error, int depth, IncludeBuffer *output) {
+    if (!source) {
+        return includebuf_append(output, "", 0);
+    }
+    if (depth > PROTOHACK_MAX_INCLUDE_DEPTH) {
+        if (error && error->ok) {
+            protoerror_set(error, 0, "Maximum include depth exceeded");
+        }
+        return false;
+    }
+
+    char *origin_dir = extract_directory(origin_path);
+    Scanner scanner;
+    scanner_init(&scanner, source);
+    const char *emit_start = source;
+
+    for (;;) {
+        Token token = scanner_scan_token(&scanner);
+        if (token.type == TOKEN_EOF) {
+            if (!includebuf_append(output, emit_start, (size_t)(token.start - emit_start))) {
+                if (error && error->ok) {
+                    protoerror_set(error, 0, "Out of memory while processing includes");
+                }
+                free(origin_dir);
+                return false;
+            }
+            break;
+        }
+
+        if (token.type == TOKEN_IDENTIFIER && token.length == 3 && memcmp(token.start, "inc", 3) == 0) {
+            Scanner lookahead = scanner;
+            Token left_paren = scanner_scan_token(&lookahead);
+            if (left_paren.type != TOKEN_LEFT_PAREN) {
+                continue;
+            }
+            Token path_token = scanner_scan_token(&lookahead);
+            if (path_token.type != TOKEN_STRING) {
+                continue;
+            }
+            Token right_paren = scanner_scan_token(&lookahead);
+            if (right_paren.type != TOKEN_RIGHT_PAREN) {
+                continue;
+            }
+            Token semicolon = scanner_scan_token(&lookahead);
+            if (semicolon.type != TOKEN_SEMICOLON) {
+                size_t column = compute_column(source, token.start);
+                if (error && error->ok) {
+                    protoerror_set_with_column(error, token.line, column, "Include directive must end with ';'");
+                }
+                free(origin_dir);
+                return false;
+            }
+
+            if (!includebuf_append(output, emit_start, (size_t)(token.start - emit_start))) {
+                if (error && error->ok) {
+                    protoerror_set(error, token.line, "Out of memory while processing includes");
+                }
+                free(origin_dir);
+                return false;
+            }
+
+            size_t literal_length = path_token.length >= 2 ? path_token.length - 2 : 0;
+            char *literal = protohack_copy_string(path_token.start + 1, literal_length);
+            char *resolved = join_path(origin_dir, literal);
+            if (!resolved) {
+                if (error && error->ok) {
+                    size_t column = compute_column(source, token.start);
+                    protoerror_set_with_column(error, token.line, column, "Unable to resolve include path '%s'", literal);
+                }
+                free(literal);
+                free(origin_dir);
+                return false;
+            }
+
+            size_t column = compute_column(source, token.start);
+            char *file_contents = read_file_contents(resolved, error, token.line, column);
+            if (!file_contents) {
+                free(literal);
+                free(resolved);
+                free(origin_dir);
+                return false;
+            }
+
+            IncludeBuffer nested;
+            includebuf_init(&nested);
+            bool ok = preprocess_includes_into(file_contents, resolved, error, depth + 1, &nested);
+            free(file_contents);
+            if (!ok) {
+                includebuf_free(&nested);
+                free(literal);
+                free(resolved);
+                free(origin_dir);
+                return false;
+            }
+
+            if (!includebuf_append(output, nested.data, nested.length)) {
+                includebuf_free(&nested);
+                free(literal);
+                free(resolved);
+                free(origin_dir);
+                if (error && error->ok) {
+                    protoerror_set(error, token.line, "Out of memory while expanding includes");
+                }
+                return false;
+            }
+
+            includebuf_free(&nested);
+            free(literal);
+            free(resolved);
+            emit_start = lookahead.current;
+            scanner = lookahead;
+        }
+    }
+
+    free(origin_dir);
+    return true;
+}
+
+static char *preprocess_includes(const char *source, const char *origin_path, ProtoError *error) {
+    IncludeBuffer buffer;
+    includebuf_init(&buffer);
+    if (!preprocess_includes_into(source, origin_path, error, 0, &buffer)) {
+        includebuf_free(&buffer);
+        return NULL;
+    }
+    if (!buffer.data) {
+        buffer.data = protohack_copy_string("", 0);
+    }
+    return buffer.data;
+}
+
+#define SUGGESTION_NO_MATCH ((size_t)-1)
+
+static size_t min_size_t(size_t a, size_t b, size_t c) {
+    size_t m = a < b ? a : b;
+    return m < c ? m : c;
+}
+
+static bool strings_equal_ci(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+static size_t levenshtein_distance_ci(const char *a, const char *b) {
+    if (!a || !b) {
+        return SUGGESTION_NO_MATCH;
+    }
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+    if (len_b > PROTOHACK_MAX_IDENTIFIER) {
+        len_b = PROTOHACK_MAX_IDENTIFIER;
+    }
+    if (len_a > PROTOHACK_MAX_IDENTIFIER) {
+        len_a = PROTOHACK_MAX_IDENTIFIER;
+    }
+    size_t prev[PROTOHACK_MAX_IDENTIFIER + 1];
+    size_t curr[PROTOHACK_MAX_IDENTIFIER + 1];
+
+    for (size_t j = 0; j <= len_b; ++j) {
+        prev[j] = j;
+    }
+
+    for (size_t i = 1; i <= len_a; ++i) {
+        curr[0] = i;
+        for (size_t j = 1; j <= len_b; ++j) {
+            size_t cost = tolower((unsigned char)a[i - 1]) == tolower((unsigned char)b[j - 1]) ? 0u : 1u;
+            curr[j] = min_size_t(prev[j] + 1u, curr[j - 1] + 1u, prev[j - 1] + cost);
+        }
+        for (size_t j = 0; j <= len_b; ++j) {
+            prev[j] = curr[j];
+        }
+    }
+
+    return prev[len_b];
+}
+
+static size_t suggestion_threshold(size_t length) {
+    if (length <= 4u) {
+        return 1u;
+    }
+    if (length <= 6u) {
+        return 2u;
+    }
+    return 3u;
+}
+
+static void update_best_suggestion(const char *input, const char *candidate, size_t *best_distance, char *best_name, size_t best_name_size) {
+    if (!candidate || candidate[0] == '\0' || strings_equal_ci(input, candidate)) {
+        return;
+    }
+    size_t distance = levenshtein_distance_ci(input, candidate);
+    if (distance < *best_distance) {
+        *best_distance = distance;
+        strncpy(best_name, candidate, best_name_size - 1);
+        best_name[best_name_size - 1] = '\0';
+    }
+}
+
+static bool suggest_identifier(Parser *parser, const char *identifier, char *out_name, size_t out_size, size_t *out_distance) {
+    if (!identifier || !out_name || out_size == 0) {
+        return false;
+    }
+
+    size_t best_distance = SUGGESTION_NO_MATCH;
+    out_name[0] = '\0';
+
+    CompilerContext *context = current_context(parser);
+    while (context) {
+        for (int i = 0; i < context->local_count; ++i) {
+            char candidate[PROTOHACK_MAX_IDENTIFIER + 1];
+            if (!token_to_identifier(&context->locals[i].name, candidate, sizeof candidate)) {
+                continue;
+            }
+            update_best_suggestion(identifier, candidate, &best_distance, out_name, out_size);
+        }
+        context = context->enclosing;
+    }
+
+    if (parser && parser->chunk && parser->chunk->globals) {
+        for (size_t i = 0; i < parser->chunk->globals_count; ++i) {
+            const char *candidate = parser->chunk->globals[i];
+            update_best_suggestion(identifier, candidate, &best_distance, out_name, out_size);
+        }
+    }
+
+    const ProtoNativeEntry *native_table = protonative_table();
+    size_t native_count = protonative_count();
+    for (size_t i = 0; i < native_count; ++i) {
+        update_best_suggestion(identifier, native_table[i].name, &best_distance, out_name, out_size);
+    }
+
+    if (out_distance) {
+        *out_distance = best_distance;
+    }
+    return out_name[0] != '\0';
+}
+
+static bool suggest_native_identifier(const char *identifier, char *out_name, size_t out_size, size_t *out_distance) {
+    if (!identifier || !out_name || out_size == 0) {
+        return false;
+    }
+
+    size_t best_distance = SUGGESTION_NO_MATCH;
+    out_name[0] = '\0';
+
+    const ProtoNativeEntry *native_table = protonative_table();
+    size_t native_count = protonative_count();
+    for (size_t i = 0; i < native_count; ++i) {
+        update_best_suggestion(identifier, native_table[i].name, &best_distance, out_name, out_size);
+    }
+
+    if (out_distance) {
+        *out_distance = best_distance;
+    }
+    return out_name[0] != '\0';
+}
+
+static size_t token_column(const Parser *parser, const Token *token) {
+    if (!parser || !token || token->type == TOKEN_ERROR || !token->start) {
+        return 0;
+    }
+    const char *begin = parser->scanner.source;
+    if (!begin) {
+        return 0;
+    }
+    const char *cursor = token->start;
+    if (cursor < begin) {
+        return 0;
+    }
+    const char *line_start = cursor;
+    while (line_start > begin && line_start[-1] != '\n') {
+        line_start--;
+    }
+    return (size_t)(cursor - line_start) + 1u;
 }
 
 static void error_at(Parser *parser, const Token *token, const char *message) {
@@ -479,7 +991,8 @@ static void error_at(Parser *parser, const Token *token, const char *message) {
     parser->panic_mode = true;
     parser->had_error = true;
     if (parser->error && parser->error->ok) {
-        protoerror_set(parser->error, token->line, "%s", message);
+        size_t column = token_column(parser, token);
+        protoerror_set_with_column(parser->error, token->line, column, "%s", message);
     }
 }
 
@@ -626,8 +1139,23 @@ static void emit_byte(Parser *parser, uint8_t byte) {
     protochunk_write(current_chunk(parser), byte, parser->previous.line);
 }
 
+static void emit_get_local(Parser *parser, uint8_t slot, size_t line) {
+    protochunk_write(current_chunk(parser), PROTO_OP_GET_LOCAL, line);
+    protochunk_write(current_chunk(parser), slot, line);
+}
+
+static void emit_set_local(Parser *parser, uint8_t slot, size_t line) {
+    protochunk_write(current_chunk(parser), PROTO_OP_SET_LOCAL, line);
+    protochunk_write(current_chunk(parser), slot, line);
+}
+
 static void emit_return(Parser *parser) {
-    protochunk_write(current_chunk(parser), PROTO_OP_NULL, parser->previous.line);
+    CompilerContext *context = current_context(parser);
+    if (context && context->function && context->function->kind == PROTO_FUNC_INITIALIZER) {
+        emit_get_local(parser, 0, parser->previous.line);
+    } else {
+        protochunk_write(current_chunk(parser), PROTO_OP_NULL, parser->previous.line);
+    }
     protochunk_write(current_chunk(parser), PROTO_OP_RETURN, parser->previous.line);
 }
 
@@ -665,7 +1193,7 @@ static uint8_t parse_call_arguments(Parser *parser) {
     if (!check(parser, TOKEN_RIGHT_PAREN)) {
         do {
             parse_expression(parser);
-            if (arg_count >= UINT8_MAX) {
+            if (arg_count >= 255u) {
                 error(parser, "Too many arguments");
             } else {
                 arg_count++;
@@ -673,20 +1201,10 @@ static uint8_t parse_call_arguments(Parser *parser) {
         } while (match(parser, TOKEN_COMMA));
     }
     consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
-    if (arg_count > UINT8_MAX) {
-        return UINT8_MAX;
+    if (arg_count > 255u) {
+        return 255u;
     }
     return (uint8_t)arg_count;
-}
-
-static void emit_get_local(Parser *parser, uint8_t slot, size_t line) {
-    protochunk_write(current_chunk(parser), PROTO_OP_GET_LOCAL, line);
-    protochunk_write(current_chunk(parser), slot, line);
-}
-
-static void emit_set_local(Parser *parser, uint8_t slot, size_t line) {
-    protochunk_write(current_chunk(parser), PROTO_OP_SET_LOCAL, line);
-    protochunk_write(current_chunk(parser), slot, line);
 }
 
 static uint16_t emit_jump(Parser *parser, uint8_t instruction) {
@@ -762,7 +1280,17 @@ static int resolve_global(Parser *parser, Token name) {
     ProtoChunk *global_chunk = parser->chunk;
     int index = protochunk_find_global(global_chunk, identifier);
     if (index < 0 || !parser->globals.defined[index]) {
-        error(parser, "Undefined global");
+        char message[256];
+        char suggestion[PROTOHACK_MAX_IDENTIFIER + 1];
+        size_t distance = SUGGESTION_NO_MATCH;
+        bool has_suggestion = suggest_identifier(parser, identifier, suggestion, sizeof suggestion, &distance);
+        size_t threshold = suggestion_threshold(strlen(identifier));
+        if (has_suggestion && distance != SUGGESTION_NO_MATCH && distance <= threshold) {
+            snprintf(message, sizeof message, "Undefined global '%s'. Did you mean '%s'?", identifier, suggestion);
+        } else {
+            snprintf(message, sizeof message, "Undefined global '%s'", identifier);
+        }
+        error(parser, message);
         return -1;
     }
     return index;
@@ -777,13 +1305,33 @@ static void finish_native_call(Parser *parser, const Token *name_token) {
 
     int native_index = protonative_index(identifier);
     if (native_index < 0) {
-        error(parser, "Unknown native function");
+        char message[256];
+        char suggestion[PROTOHACK_MAX_IDENTIFIER + 1];
+        size_t distance = SUGGESTION_NO_MATCH;
+        bool has_suggestion = suggest_native_identifier(identifier, suggestion, sizeof suggestion, &distance);
+        size_t threshold = suggestion_threshold(strlen(identifier));
+        if (has_suggestion && distance != SUGGESTION_NO_MATCH && distance <= threshold) {
+            snprintf(message, sizeof message, "Unknown native function '%s'. Did you mean '%s'?", identifier, suggestion);
+        } else {
+            snprintf(message, sizeof message, "Unknown native function '%s'", identifier);
+        }
+        error(parser, message);
         return;
     }
 
     const ProtoNativeEntry *entry = protonative_resolve(identifier);
     if (!entry) {
-        error(parser, "Unknown native function");
+        char message[256];
+        char suggestion[PROTOHACK_MAX_IDENTIFIER + 1];
+        size_t distance = SUGGESTION_NO_MATCH;
+        bool has_suggestion = suggest_native_identifier(identifier, suggestion, sizeof suggestion, &distance);
+        size_t threshold = suggestion_threshold(strlen(identifier));
+        if (has_suggestion && distance != SUGGESTION_NO_MATCH && distance <= threshold) {
+            snprintf(message, sizeof message, "Unknown native function '%s'. Did you mean '%s'?", identifier, suggestion);
+        } else {
+            snprintf(message, sizeof message, "Unknown native function '%s'", identifier);
+        }
+        error(parser, message);
         return;
     }
 
@@ -858,6 +1406,40 @@ static void parse_probe(Parser *parser, bool can_assign) {
     consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after probe arguments");
     emit_byte(parser, PROTO_OP_LOAD_TYPED);
     emit_byte(parser, (uint8_t)type_tag);
+}
+
+static void parse_this(Parser *parser, bool can_assign) {
+    (void)can_assign;
+    if (!parser->current_class) {
+        error(parser, "'this' is only valid inside class methods");
+        return;
+    }
+    emit_get_local(parser, 0, parser->previous.line);
+}
+
+static void parse_dot(Parser *parser, bool can_assign) {
+    consume(parser, TOKEN_IDENTIFIER, "Expect property name after '.'");
+    Token name = parser->previous;
+
+    Token saved_previous = parser->previous;
+    parser->previous = name;
+    uint16_t name_constant = make_constant(parser, proto_value_string(name.start, name.length));
+    parser->previous = saved_previous;
+
+    if (can_assign && match(parser, TOKEN_EQUAL)) {
+        parse_expression(parser);
+        protochunk_write(current_chunk(parser), PROTO_OP_SET_PROPERTY, name.line);
+        protochunk_write_u16(current_chunk(parser), name_constant, name.line);
+    } else if (match(parser, TOKEN_LEFT_PAREN)) {
+        protochunk_write(current_chunk(parser), PROTO_OP_GET_PROPERTY, name.line);
+        protochunk_write_u16(current_chunk(parser), name_constant, name.line);
+        uint8_t arg_count = parse_call_arguments(parser);
+        emit_byte(parser, PROTO_OP_CALL);
+        emit_byte(parser, arg_count);
+    } else {
+        protochunk_write(current_chunk(parser), PROTO_OP_GET_PROPERTY, name.line);
+        protochunk_write_u16(current_chunk(parser), name_constant, name.line);
+    }
 }
 
 static void parse_grouping(Parser *parser, bool can_assign) {
@@ -1058,7 +1640,7 @@ static ParseRule rules[] = {
     [TOKEN_LEFT_BRACE] = {NULL, NULL, PREC_NONE},
     [TOKEN_RIGHT_BRACE] = {NULL, NULL, PREC_NONE},
     [TOKEN_COMMA] = {NULL, NULL, PREC_NONE},
-    [TOKEN_DOT] = {NULL, NULL, PREC_NONE},
+    [TOKEN_DOT] = {NULL, parse_dot, PREC_PRIMARY},
     [TOKEN_MINUS] = {parse_unary, parse_binary, PREC_TERM},
     [TOKEN_PLUS] = {NULL, parse_binary, PREC_TERM},
     [TOKEN_SEMICOLON] = {NULL, NULL, PREC_NONE},
@@ -1085,6 +1667,7 @@ static ParseRule rules[] = {
     [TOKEN_NULL] = {parse_literal, NULL, PREC_NONE},
     [TOKEN_PRINT] = {NULL, NULL, PREC_NONE},
     [TOKEN_TRUE] = {parse_literal, NULL, PREC_NONE},
+    [TOKEN_THIS] = {parse_this, NULL, PREC_NONE},
     [TOKEN_WHILE] = {NULL, NULL, PREC_NONE},
     [TOKEN_CONST] = {NULL, NULL, PREC_NONE},
     [TOKEN_CALL] = {parse_call_keyword, NULL, PREC_NONE},
@@ -1353,6 +1936,140 @@ static void parse_function_body(Parser *parser, ProtoFunction *function) {
     end_scope(parser);
 }
 
+static void method_declaration(Parser *parser, Token class_name) {
+    (void)class_name;
+    consume(parser, TOKEN_IDENTIFIER, "Expect method name");
+    Token method_name = parser->previous;
+
+    char identifier[PROTOHACK_MAX_IDENTIFIER + 1];
+    if (!token_to_identifier(&method_name, identifier, sizeof identifier)) {
+        error(parser, "Identifier is too long");
+        return;
+    }
+
+    bool is_initializer = (method_name.length == 4 && memcmp(method_name.start, "init", 4) == 0);
+    ProtoFunctionKind kind = is_initializer ? PROTO_FUNC_INITIALIZER : PROTO_FUNC_METHOD;
+    ProtoFunction *function = proto_function_new(kind, identifier);
+
+    CompilerContext context = {0};
+    context.function = function;
+    context.chunk = &function->chunk;
+    context.local_count = 0;
+    context.scope_depth = 0;
+    context.expected_return = PROTO_TYPE_NONE;
+    context.enclosing = parser->compiler;
+
+    Token synthetic = {.type = TOKEN_THIS, .start = "this", .length = 4, .line = method_name.line};
+    context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY};
+
+    CompilerContext *previous = parser->compiler;
+    parser->compiler = &context;
+
+    consume(parser, TOKEN_LEFT_PAREN, "Expect '(' after method name");
+    if (!check(parser, TOKEN_RIGHT_PAREN)) {
+        do {
+            if (function->arity >= PROTOHACK_MAX_PARAMS) {
+                error(parser, "Too many parameters");
+            }
+            consume(parser, TOKEN_IDENTIFIER, "Expect parameter name");
+            Token param_name = parser->previous;
+            ProtoTypeTag param_type = PROTO_TYPE_ANY;
+            if (match(parser, TOKEN_AS)) {
+                param_type = parse_type_tag(parser);
+            }
+            if (function->arity < PROTOHACK_MAX_PARAMS) {
+                function->param_types[function->arity] = param_type;
+                function->arity++;
+            }
+            add_local(parser, param_name, false, param_type);
+            CompilerContext *ctx = current_context(parser);
+            if (ctx) {
+                ctx->locals[ctx->local_count - 1].depth = 0;
+            }
+        } while (match(parser, TOKEN_COMMA));
+    }
+    consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after parameters");
+
+    ProtoTypeTag return_type = PROTO_TYPE_NONE;
+    if (match(parser, TOKEN_GIVES)) {
+        return_type = parse_type_tag(parser);
+    }
+    if (kind == PROTO_FUNC_INITIALIZER && return_type != PROTO_TYPE_NONE) {
+        error(parser, "Initializers cannot declare return types");
+        return_type = PROTO_TYPE_NONE;
+    }
+    function->return_type = return_type;
+    context.expected_return = return_type;
+
+    parse_function_body(parser, function);
+    emit_return(parser);
+
+    sync_function_globals(parser, &function->chunk);
+
+    parser->compiler = previous;
+
+    Token saved = parser->previous;
+    parser->previous = method_name;
+    emit_constant(parser, proto_value_function(function));
+    parser->previous = saved;
+
+    parser->previous = method_name;
+    uint16_t name_constant = make_constant(parser, proto_value_string(method_name.start, method_name.length));
+    parser->previous = saved;
+
+    protochunk_write(current_chunk(parser), PROTO_OP_METHOD, method_name.line);
+    protochunk_write_u16(current_chunk(parser), name_constant, method_name.line);
+}
+
+static void class_declaration(Parser *parser) {
+    CompilerContext *enclosing = current_context(parser);
+    if (enclosing && enclosing != &parser->root) {
+        error(parser, "Nested 'class' declarations are not supported yet");
+        return;
+    }
+
+    consume(parser, TOKEN_IDENTIFIER, "Expect class name after 'class'");
+    Token class_name = parser->previous;
+
+    char identifier[PROTOHACK_MAX_IDENTIFIER + 1];
+    if (!token_to_identifier(&class_name, identifier, sizeof identifier)) {
+        error(parser, "Identifier is too long");
+        return;
+    }
+
+    int global_index = declare_global(parser, class_name, true);
+    if (global_index < 0) {
+        return;
+    }
+
+    parser->globals.defined[global_index] = true;
+    parser->globals.is_const[global_index] = true;
+
+    Token saved = parser->previous;
+    parser->previous = class_name;
+    uint16_t name_constant = make_constant(parser, proto_value_string(class_name.start, class_name.length));
+    parser->previous = saved;
+
+    protochunk_write(current_chunk(parser), PROTO_OP_CLASS, class_name.line);
+    protochunk_write_u16(current_chunk(parser), name_constant, class_name.line);
+    emit_set_global(parser, &class_name, (uint16_t)global_index);
+
+    ClassCompiler class_compiler = {0};
+    class_compiler.name = class_name;
+    class_compiler.enclosing = parser->current_class;
+    parser->current_class = &class_compiler;
+
+    consume(parser, TOKEN_LEFT_BRACE, "Expect '{' before class body");
+    while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF)) {
+        method_declaration(parser, class_name);
+    }
+    consume(parser, TOKEN_RIGHT_BRACE, "Expect '}' after class body");
+
+    protochunk_write(current_chunk(parser), PROTO_OP_POP, class_name.line);
+
+    parser->current_class = class_compiler.enclosing;
+}
+
 static void craft_declaration(Parser *parser) {
     CompilerContext *enclosing = current_context(parser);
     if (enclosing && enclosing != &parser->root) {
@@ -1501,6 +2218,8 @@ static void declaration(Parser *parser) {
         let_declaration(parser, true);
     } else if (match(parser, TOKEN_CRAFT)) {
         craft_declaration(parser);
+    } else if (match(parser, TOKEN_CLASS)) {
+        class_declaration(parser);
     } else {
         statement(parser);
     }
@@ -1510,7 +2229,7 @@ static void declaration(Parser *parser) {
     }
 }
 
-bool protohack_compile_source(const char *source, ProtoChunk *chunk, ProtoError *error) {
+bool protohack_compile_source(const char *source, const char *origin_path, ProtoChunk *chunk, ProtoError *error) {
     if (!source || !chunk || !error) {
         if (error) {
             protoerror_set(error, 0, "Invalid arguments to compiler");
@@ -1520,8 +2239,13 @@ bool protohack_compile_source(const char *source, ProtoChunk *chunk, ProtoError 
 
     protoerror_reset(error);
 
+    char *preprocessed = preprocess_includes(source, origin_path, error);
+    if (!preprocessed) {
+        return false;
+    }
+
     Parser parser;
-    parser_init(&parser, source, chunk, error);
+    parser_init(&parser, preprocessed, chunk, error);
 
     parser_advance(&parser);
     while (!check(&parser, TOKEN_EOF) && !parser.had_error) {
@@ -1530,5 +2254,7 @@ bool protohack_compile_source(const char *source, ProtoChunk *chunk, ProtoError 
     parser_advance(&parser);
     emit_return(&parser);
 
-    return !parser.had_error;
+    bool success = !parser.had_error;
+    free(preprocessed);
+    return success;
 }
