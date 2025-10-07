@@ -15,7 +15,9 @@ extern "C" {
 
 typedef enum {
     PROTO_FUNC_SCRIPT = 0,
-    PROTO_FUNC_CRAFT
+    PROTO_FUNC_CRAFT,
+    PROTO_FUNC_METHOD,
+    PROTO_FUNC_INITIALIZER
 } ProtoFunctionKind;
 
 typedef struct ProtoFunction {
