@@ -1,0 +1,65 @@
+// Protohack in-place file encryption utility
+
+craft mod_two(length as num) gives num {
+    let remainder = length;
+    while (remainder >= 2) {
+        remainder = remainder - 2;
+    }
+    yield remainder;
+}
+
+println("==============================");
+println("Protohack in-place file vault");
+println("==============================\n");
+
+println("This helper overwrites the target text file with encrypted content. Keep the key safe; " +
+    "without it, the plaintext cannot be restored.\n");
+
+let path = read_line("Path to text file: ");
+if (path == null or len(path) == 0) {
+    println("Aborted: no path provided.");
+} else {
+    let mode_input = read_line("Mode (1=encrypt, 2=decrypt): ");
+    if (mode_input == null or len(mode_input) == 0) {
+        println("Aborted: no mode selected.");
+    } else {
+        if (mode_input == "1") {
+            let key_input = read_line("Enter hex key (leave blank for random): ");
+            let key_text = "";
+            if (key_input != null) {
+                key_text = key_input;
+            }
+
+            let has_custom_key = len(key_text) > 0;
+            let custom_key_remainder = mod_two(len(key_text));
+            if (has_custom_key and custom_key_remainder == 1) {
+                println("Encryption aborted: key must contain an even number of hex digits.");
+            } else {
+                let key = null;
+                if (has_custom_key) {
+                    println("Encrypting " + path + " with operator-provided key...");
+                    key = encrypt_file(path, path, key_text);
+                } else {
+                    println("Encrypting " + path + " with generated random key...");
+                    key = encrypt_file(path, path);
+                }
+
+                println("File successfully overwritten with encrypted data.");
+                println("Retain this key to decrypt later: " + key);
+            }
+        } else if (mode_input == "2") {
+            let key_required = read_line("Enter hex key (required): ");
+            if (key_required == null or len(key_required) == 0) {
+                println("Decryption aborted: key is required.");
+            } else if (mod_two(len(key_required)) == 1) {
+                println("Decryption aborted: key must contain an even number of hex digits.");
+            } else {
+                println("Attempting to decrypt " + path + "...");
+                decrypt_file(path, path, key_required);
+                println("File restored using the provided key.");
+            }
+        } else {
+            println("Unsupported mode: " + mode_input + ". Choose '1' for encrypt or '2' for decrypt.");
+        }
+    }
+}
