@@ -42,6 +42,30 @@ ProtoValue proto_value_function(ProtoFunction *function) {
     return value;
 }
 
+ProtoValue proto_value_class(ProtoClass *klass) {
+    ProtoValue value;
+    value.type = PROTO_VAL_CLASS;
+    value.as.klass = klass;
+    proto_class_retain(klass);
+    return value;
+}
+
+ProtoValue proto_value_instance(ProtoInstance *instance) {
+    ProtoValue value;
+    value.type = PROTO_VAL_INSTANCE;
+    value.as.instance = instance;
+    proto_instance_retain(instance);
+    return value;
+}
+
+ProtoValue proto_value_bound_method(ProtoBoundMethod *bound) {
+    ProtoValue value;
+    value.type = PROTO_VAL_BOUND_METHOD;
+    value.as.bound_method = bound;
+    proto_bound_method_retain(bound);
+    return value;
+}
+
 ProtoValue proto_value_memory(ProtoTypedMemory memory) {
     ProtoValue value;
     value.type = PROTO_VAL_MEMORY;
@@ -66,6 +90,12 @@ ProtoValue proto_value_copy(const ProtoValue *value) {
         }
         case PROTO_VAL_FUNCTION:
             return proto_value_function(value->as.function);
+        case PROTO_VAL_CLASS:
+            return proto_value_class(value->as.klass);
+        case PROTO_VAL_INSTANCE:
+            return proto_value_instance(value->as.instance);
+        case PROTO_VAL_BOUND_METHOD:
+            return proto_value_bound_method(value->as.bound_method);
         case PROTO_VAL_MEMORY:
             return proto_value_memory(proto_memory_clone(&value->as.memory));
         default:
@@ -84,6 +114,18 @@ void proto_value_free(ProtoValue *value) {
             break;
         case PROTO_VAL_MEMORY:
             proto_memory_free(&value->as.memory);
+            break;
+        case PROTO_VAL_CLASS:
+            proto_class_release(value->as.klass);
+            value->as.klass = NULL;
+            break;
+        case PROTO_VAL_INSTANCE:
+            proto_instance_release(value->as.instance);
+            value->as.instance = NULL;
+            break;
+        case PROTO_VAL_BOUND_METHOD:
+            proto_bound_method_release(value->as.bound_method);
+            value->as.bound_method = NULL;
             break;
         default:
             break;
@@ -112,6 +154,12 @@ bool proto_value_equal(const ProtoValue *a, const ProtoValue *b) {
             return strcmp(a->as.string, b->as.string) == 0;
         case PROTO_VAL_FUNCTION:
             return a->as.function == b->as.function;
+        case PROTO_VAL_CLASS:
+            return a->as.klass == b->as.klass;
+        case PROTO_VAL_INSTANCE:
+            return a->as.instance == b->as.instance;
+        case PROTO_VAL_BOUND_METHOD:
+            return a->as.bound_method == b->as.bound_method;
         case PROTO_VAL_MEMORY:
             if (a->as.memory.element_type != b->as.memory.element_type || a->as.memory.count != b->as.memory.count) {
                 return false;
@@ -162,6 +210,24 @@ void proto_value_print(const ProtoValue *value) {
             printf("<craft %s/%u>", name, value->as.function ? value->as.function->arity : 0u);
             break;
         }
+        case PROTO_VAL_CLASS: {
+            const char *name = proto_class_name(value->as.klass);
+            printf("<class %s>", name ? name : "");
+            break;
+        }
+        case PROTO_VAL_INSTANCE: {
+            const char *name = proto_class_name(proto_instance_class(value->as.instance));
+            printf("<%s instance>", name ? name : "");
+            break;
+        }
+        case PROTO_VAL_BOUND_METHOD: {
+            ProtoFunction *method = proto_bound_method_function(value->as.bound_method);
+            ProtoInstance *instance = proto_bound_method_receiver(value->as.bound_method);
+            const char *class_name = proto_class_name(proto_instance_class(instance));
+            const char *method_name = method && method->name ? method->name : "<anonymous>";
+            printf("<bound %s.%s>", class_name ? class_name : "", method_name);
+            break;
+        }
         case PROTO_VAL_MEMORY: {
             const char *type_name = proto_type_tag_name(value->as.memory.element_type);
             printf("<memory %s[%zu]>", type_name, value->as.memory.count);
@@ -201,6 +267,36 @@ char *proto_value_to_cstring(const ProtoValue *value) {
             int written = snprintf(buffer, sizeof buffer, "<craft %s/%u>", name, value->as.function ? value->as.function->arity : 0u);
             if (written < 0) {
                 return protohack_copy_string("<craft>", 7);
+            }
+            return protohack_copy_string(buffer, (size_t)written);
+        }
+        case PROTO_VAL_CLASS: {
+            char buffer[64];
+            const char *name = proto_class_name(value->as.klass);
+            int written = snprintf(buffer, sizeof buffer, "<class %s>", name ? name : "");
+            if (written < 0) {
+                return protohack_copy_string("<class>", 7);
+            }
+            return protohack_copy_string(buffer, (size_t)written);
+        }
+        case PROTO_VAL_INSTANCE: {
+            char buffer[64];
+            const char *name = proto_class_name(proto_instance_class(value->as.instance));
+            int written = snprintf(buffer, sizeof buffer, "<%s instance>", name ? name : "");
+            if (written < 0) {
+                return protohack_copy_string("<instance>", 10);
+            }
+            return protohack_copy_string(buffer, (size_t)written);
+        }
+        case PROTO_VAL_BOUND_METHOD: {
+            char buffer[96];
+            ProtoFunction *method = proto_bound_method_function(value->as.bound_method);
+            ProtoInstance *instance = proto_bound_method_receiver(value->as.bound_method);
+            const char *class_name = proto_class_name(proto_instance_class(instance));
+            const char *method_name = method && method->name ? method->name : "<anonymous>";
+            int written = snprintf(buffer, sizeof buffer, "<bound %s.%s>", class_name ? class_name : "", method_name);
+            if (written < 0) {
+                return protohack_copy_string("<bound>", 7);
             }
             return protohack_copy_string(buffer, (size_t)written);
         }
