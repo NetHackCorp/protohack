@@ -33,6 +33,14 @@
         } \
     } while (0)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 char *protohack_copy_string(const char *start, size_t length);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
