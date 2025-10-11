@@ -13,11 +13,14 @@ size_t protojit_opcode_operand_width(ProtoOpCode opcode) {
             return 2u;
         case PROTO_OP_GET_LOCAL:
         case PROTO_OP_SET_LOCAL:
+        case PROTO_OP_ADDR_LOCAL:
         case PROTO_OP_CALL:
         case PROTO_OP_ALLOC_TYPED:
         case PROTO_OP_STORE_TYPED:
         case PROTO_OP_LOAD_TYPED:
             return 1u;
+        case PROTO_OP_ADDR_GLOBAL:
+            return 3u;
         case PROTO_OP_CALL_NATIVE:
         case PROTO_OP_CLASS:
         case PROTO_OP_METHOD:
