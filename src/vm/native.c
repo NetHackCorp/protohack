@@ -49,7 +49,9 @@ static int hex_digit_value(char c) {
 static bool expect_number_arg(const ProtoValue *value, const char *function_name, size_t index, ProtoError *error, double *out) {
     if (value->type != PROTO_VAL_NUMBER) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "%s expects argument %zu to be a number", function_name, index);
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "%s expects argument %zu to be a number", function_name, index);
+            protoerror_set_message_key(error, "native.arg_type.number");
+            protoerror_set_hint(error, "Convert argument %zu to a numeric type before calling %s.", index, function_name);
         }
         return false;
     }
@@ -60,7 +62,9 @@ static bool expect_number_arg(const ProtoValue *value, const char *function_name
 static bool expect_string_arg(const ProtoValue *value, const char *function_name, size_t index, ProtoError *error, const char **out) {
     if (value->type != PROTO_VAL_STRING) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "%s expects argument %zu to be a string", function_name, index);
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "%s expects argument %zu to be a string", function_name, index);
+            protoerror_set_message_key(error, "native.arg_type.string");
+            protoerror_set_hint(error, "Ensure argument %zu resolves to text before calling %s.", index, function_name);
         }
         return false;
     }
@@ -96,7 +100,9 @@ static bool native_sleep(ProtoVM *vm, const ProtoValue *args, uint8_t arg_count,
     (void)vm;
     if (arg_count != 1 || args[0].type != PROTO_VAL_NUMBER) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "sleep expects a single numeric duration in milliseconds");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_ARITY, 0, "sleep expects a single numeric duration in milliseconds");
+            protoerror_set_message_key(error, "native.sleep.arity");
+            protoerror_set_hint(error, "Call sleep(duration_ms) with exactly one numeric argument.");
         }
         return false;
     }
@@ -104,7 +110,9 @@ static bool native_sleep(ProtoVM *vm, const ProtoValue *args, uint8_t arg_count,
     double milliseconds = args[0].as.number;
     if (!isfinite(milliseconds) || milliseconds < 0.0) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "sleep expects a non-negative finite duration");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "sleep expects a non-negative finite duration");
+            protoerror_set_message_key(error, "native.sleep.range");
+            protoerror_set_hint(error, "Clamp or validate the duration before invoking sleep.");
         }
         return false;
     }
@@ -151,7 +159,9 @@ static bool native_hex_encode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     (void)vm;
     if (arg_count != 1) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "hex_encode expects one argument");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_ARITY, 0, "hex_encode expects one argument");
+            protoerror_set_message_key(error, "native.hex_encode.arity");
+            protoerror_set_hint(error, "Invoke hex_encode(value) with a single raw/text buffer or string.");
         }
         return false;
     }
@@ -167,7 +177,9 @@ static bool native_hex_encode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
         const ProtoTypedMemory *memory = &args[0].as.memory;
         if (memory->count > 0 && !memory->data) {
             if (error && error->ok) {
-                protoerror_set(error, 0, "hex_encode received invalid memory block");
+                protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "hex_encode received invalid memory block");
+                protoerror_set_message_key(error, "native.hex_encode.memory_invalid");
+                protoerror_set_hint(error, "Ensure the memory block passed to hex_encode is initialized.");
             }
             return false;
         }
@@ -179,7 +191,9 @@ static bool native_hex_encode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
                 break;
             default:
                 if (error && error->ok) {
-                    protoerror_set(error, 0, "hex_encode expects raw or text memory");
+                    protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "hex_encode expects raw or text memory");
+                    protoerror_set_message_key(error, "native.hex_encode.memory_type");
+                    protoerror_set_hint(error, "Pass a raw/text typed memory region to hex_encode.");
                 }
                 return false;
         }
@@ -198,7 +212,9 @@ static bool native_hex_encode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     char *buffer = (char *)malloc(length * 2 + 1);
     if (!buffer) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "hex_encode failed to allocate output");
+            protoerror_set_code(error, PROTO_DIAG_RUNTIME_ALLOCATION, 0, "hex_encode failed to allocate output");
+            protoerror_set_message_key(error, "native.hex_encode.alloc");
+            protoerror_set_hint(error, "Reduce input size or free memory before calling hex_encode.");
         }
         free(owned_text);
         return false;
@@ -222,7 +238,9 @@ static bool native_hex_decode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     (void)vm;
     if (arg_count != 1 || args[0].type != PROTO_VAL_STRING) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "hex_decode expects a single hex string argument");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "hex_decode expects a single hex string argument");
+            protoerror_set_message_key(error, "native.hex_decode.arg_type");
+            protoerror_set_hint(error, "Call hex_decode(text) with exactly one string argument containing hex characters.");
         }
         return false;
     }
@@ -232,7 +250,9 @@ static bool native_hex_decode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
 
     if (length % 2 != 0) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "hex_decode expects an even-length string");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "hex_decode expects an even-length string");
+            protoerror_set_message_key(error, "native.hex_decode.length");
+            protoerror_set_hint(error, "Pad the hex string to an even length before decoding.");
         }
         return false;
     }
@@ -246,7 +266,9 @@ static bool native_hex_decode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
         if (hi < 0 || lo < 0) {
             proto_memory_free(&memory);
             if (error && error->ok) {
-                protoerror_set(error, 0, "hex_decode encountered non-hex characters");
+                protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "hex_decode encountered non-hex characters");
+                protoerror_set_message_key(error, "native.hex_decode.invalid_char");
+                protoerror_set_hint(error, "Remove characters outside [0-9a-fA-F] before decoding.");
             }
             return false;
         }
@@ -260,7 +282,9 @@ static bool native_hex_decode(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
 static bool native_rand_bytes(ProtoVM *vm, const ProtoValue *args, uint8_t arg_count, ProtoValue *result, ProtoError *error) {
     if (arg_count != 1 || args[0].type != PROTO_VAL_NUMBER) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "rand_bytes expects a single numeric argument");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_ARITY, 0, "rand_bytes expects a single numeric argument");
+            protoerror_set_message_key(error, "native.rand_bytes.arity");
+            protoerror_set_hint(error, "Call rand_bytes(length) with exactly one numeric length argument.");
         }
         return false;
     }
@@ -268,14 +292,18 @@ static bool native_rand_bytes(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     double requested = args[0].as.number;
     if (!isfinite(requested) || requested < 0.0) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "rand_bytes expects a non-negative finite length");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "rand_bytes expects a non-negative finite length");
+            protoerror_set_message_key(error, "native.rand_bytes.range");
+            protoerror_set_hint(error, "Clamp the requested length to a non-negative finite number.");
         }
         return false;
     }
 
     if (requested > (double)SIZE_MAX) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "rand_bytes argument is too large");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "rand_bytes argument is too large");
+            protoerror_set_message_key(error, "native.rand_bytes.limit");
+            protoerror_set_hint(error, "Request fewer bytes or stream the random data in chunks.");
         }
         return false;
     }
@@ -283,7 +311,9 @@ static bool native_rand_bytes(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     size_t count = (size_t)requested;
     if (fabs(requested - (double)count) > 1e-9) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "rand_bytes expects an integer length");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "rand_bytes expects an integer length");
+            protoerror_set_message_key(error, "native.rand_bytes.integer");
+            protoerror_set_hint(error, "Round the requested length to an integer before calling rand_bytes.");
         }
         return false;
     }
@@ -291,7 +321,9 @@ static bool native_rand_bytes(ProtoVM *vm, const ProtoValue *args, uint8_t arg_c
     const size_t kRandBytesLimit = 1024u * 1024u;
     if (count > kRandBytesLimit) {
         if (error && error->ok) {
-            protoerror_set(error, 0, "rand_bytes limit exceeded (max 1048576)");
+            protoerror_set_code(error, PROTO_DIAG_NATIVE_ARG_TYPE, 0, "rand_bytes limit exceeded (max 1048576)");
+            protoerror_set_message_key(error, "native.rand_bytes.limit_max");
+            protoerror_set_hint(error, "Split the request into chunks of at most 1048576 bytes.");
         }
         return false;
     }
@@ -454,6 +486,19 @@ static bool native_println(ProtoVM *vm, const ProtoValue *args, uint8_t arg_coun
         proto_value_print(&args[i]);
     }
     printf("\n");
+    *result = proto_value_null();
+    return true;
+}
+
+static bool native_expect_num_binding(ProtoVM *vm, const ProtoValue *args, uint8_t arg_count, ProtoValue *result, ProtoError *error) {
+    (void)vm;
+    (void)args;
+    if (arg_count != 0) {
+        if (error && error->ok) {
+            protoerror_set(error, 0, "expect_num_binding does not take arguments");
+        }
+        return false;
+    }
     *result = proto_value_null();
     return true;
 }
@@ -840,32 +885,34 @@ static bool native_net_interfaces(ProtoVM *vm, const ProtoValue *args, uint8_t a
 }
 
 static const ProtoNativeEntry kNativeTable[] = {
-    {"clock", native_clock, 0, 0},
-    {"sleep", native_sleep, 1, 1},
-    {"rand", native_rand, 0, 1},
-    {"rand_bytes", native_rand_bytes, 1, 1},
-    {"sqrt", native_sqrt, 1, 1},
-    {"pow", native_pow, 2, 2},
-    {"len", native_len, 1, 1},
-    {"to_string", native_to_string, 1, 1},
-    {"upper", native_upper, 1, 1},
-    {"lower", native_lower, 1, 1},
-    {"hex_encode", native_hex_encode, 1, 1},
-    {"hex_decode", native_hex_decode, 1, 1},
-    {"encrypt_file", native_encrypt_file, 2, 3},
-    {"decrypt_file", native_decrypt_file, 3, 3},
-    {"complex_add", native_complex_add, 4, 4},
-    {"complex_sub", native_complex_sub, 4, 4},
-    {"complex_mul", native_complex_mul, 4, 4},
-    {"complex_div", native_complex_div, 4, 4},
-    {"complex_abs", native_complex_abs, 2, 2},
-    {"complex_exp", native_complex_exp, 2, 2},
-    {"net_ping", native_net_ping, 1, 2},
-    {"net_hostname", native_net_hostname, 0, 0},
-    {"net_resolve", native_net_resolve, 1, 1},
-    {"net_interfaces", native_net_interfaces, 0, 0},
-    {"println", native_println, 0, PROTOHACK_MAX_NATIVE_ARGS},
-    {NULL, NULL, 0, 0}
+    {"clock", native_clock, 0, 0, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 0)},
+    {"sleep", native_sleep, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NONE, 1)},
+    {"rand", native_rand, 0, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 1)},
+    {"rand_bytes", native_rand_bytes, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 1)},
+    {"sqrt", native_sqrt, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 1)},
+    {"pow", native_pow, 2, 2, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 2)},
+    {"len", native_len, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 1)},
+    {"to_string", native_to_string, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 1)},
+    {"upper", native_upper, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 1)},
+    {"lower", native_lower, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 1)},
+    {"hex_encode", native_hex_encode, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 1)},
+    {"hex_decode", native_hex_decode, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 1)},
+    {"encrypt_file", native_encrypt_file, 2, 3, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 3)},
+    {"decrypt_file", native_decrypt_file, 3, 3, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_FLAG, 3)},
+    {"complex_add", native_complex_add, 4, 4, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 4)},
+    {"complex_sub", native_complex_sub, 4, 4, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 4)},
+    {"complex_mul", native_complex_mul, 4, 4, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 4)},
+    {"complex_div", native_complex_div, 4, 4, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 4)},
+    {"complex_abs", native_complex_abs, 2, 2, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NUM, 2)},
+    {"complex_exp", native_complex_exp, 2, 2, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_RAW, 2)},
+    {"net_ping", native_net_ping, 1, 2, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_FLAG, 2)},
+    {"net_hostname", native_net_hostname, 0, 0, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 0)},
+    {"net_resolve", native_net_resolve, 1, 1, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 1)},
+    {"net_interfaces", native_net_interfaces, 0, 0, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_TEXT, 0)},
+    {"println", native_println, 0, PROTOHACK_MAX_NATIVE_ARGS, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NONE, PROTOHACK_MAX_NATIVE_ARGS)},
+    {"expect_num_binding", native_expect_num_binding, 0, 0,
+        PROTO_NATIVE_SIGNATURE_WITH_BINDINGS(PROTO_TYPE_NONE, 0, PROTO_BINDING_SET1(PROTO_BINDING_CONCRETE(PROTO_TYPE_NUM)))},
+    {NULL, NULL, 0, 0, PROTO_NATIVE_SIGNATURE_SIMPLE(PROTO_TYPE_NONE, 0)}
 };
 
 const ProtoNativeEntry *protonative_table(void) {
