@@ -1,11 +1,13 @@
 #include "protohack/vm.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "protohack/error.h"
+#include "protohack/binding.h"
 #include "protohack/internal/common.h"
 #include "protohack/native.h"
 #include "protohack/opcode.h"
@@ -13,6 +15,622 @@
 #include "protohack/value.h"
 #include "protohack/object.h"
 #include "protohack/jit_ir.h"
+
+static ProtoCallFrame *current_frame(ProtoVM *vm);
+
+static bool binding_sets_equal(const ProtoTypeBindingSet *a, const ProtoTypeBindingSet *b) {
+    if (!a || !b) {
+        return false;
+    }
+    if (a->count != b->count) {
+        return false;
+    }
+    for (uint8_t i = 0; i < a->count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        const ProtoTypeBinding *lhs = &a->entries[i];
+        const ProtoTypeBinding *rhs = &b->entries[i];
+        if (lhs->tag != rhs->tag || lhs->param != rhs->param) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void binding_set_copy(ProtoTypeBindingSet *dest, const ProtoTypeBindingSet *src) {
+    if (!dest) {
+        return;
+    }
+    if (!src) {
+        dest->count = 0;
+        for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            dest->entries[i].tag = PROTO_TYPE_ANY;
+            dest->entries[i].param = -1;
+        }
+        return;
+    }
+    dest->count = src->count;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        dest->entries[i] = src->entries[i];
+    }
+}
+
+static uint64_t fnv1a_update(uint64_t hash, uint8_t byte) {
+    const uint64_t prime = 1099511628211ull;
+    hash ^= (uint64_t)byte;
+    hash *= prime;
+    return hash;
+}
+
+static uint64_t binding_set_fingerprint(const ProtoFunction *template_function, const ProtoTypeBindingSet *bindings) {
+    const uint64_t offset_basis = 1469598103934665603ull;
+    uint64_t hash = offset_basis;
+
+    const ProtoFunction *key_template = template_function;
+    if (key_template && key_template->template_origin) {
+        key_template = key_template->template_origin;
+    }
+
+    uintptr_t ptr_value = (uintptr_t)key_template;
+    for (size_t i = 0; i < sizeof(ptr_value); ++i) {
+        hash = fnv1a_update(hash, (uint8_t)((ptr_value >> (i * 8)) & 0xFFu));
+    }
+
+    if (!bindings) {
+        return fnv1a_update(hash, 0u);
+    }
+
+    hash = fnv1a_update(hash, bindings->count);
+    uint8_t count = bindings->count;
+    if (count > PROTOHACK_MAX_TYPE_PARAMS) {
+        count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+        const ProtoTypeBinding *binding = &bindings->entries[i];
+        hash = fnv1a_update(hash, (uint8_t)binding->tag);
+        hash = fnv1a_update(hash, (uint8_t)(binding->param & 0xFF));
+    }
+    return hash;
+}
+
+static bool binding_is_concrete(const ProtoTypeBinding *binding) {
+    return binding && binding->tag != PROTO_TYPE_ANY && binding->param < 0;
+}
+
+static bool binding_set_fully_concrete(const ProtoTypeBindingSet *set) {
+    if (!set) {
+        return false;
+    }
+    for (uint8_t i = 0; i < set->count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        if (!binding_is_concrete(&set->entries[i])) {
+            return false;
+        }
+    }
+    return set->count > 0;
+}
+
+static bool binding_contract_satisfied(const ProtoTypeBindingSet *contract, const ProtoTypeBindingSet *active) {
+    if (!contract || contract->count == 0) {
+        return true;
+    }
+    if (!active || active->count < contract->count) {
+        return false;
+    }
+
+    uint8_t limit = contract->count;
+    if (limit > PROTOHACK_MAX_TYPE_PARAMS) {
+        limit = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+
+    for (uint8_t i = 0; i < limit; ++i) {
+        const ProtoTypeBinding *expected = &contract->entries[i];
+        const ProtoTypeBinding *observed = &active->entries[i];
+
+        bool expected_symbolic = expected->param >= 0;
+        bool observed_symbolic = observed->param >= 0;
+
+        if (expected_symbolic) {
+            if (observed_symbolic && expected->param != observed->param) {
+                return false;
+            }
+            // Symbolic expectations tolerate concrete bindings at runtime.
+            continue;
+        }
+
+        if (observed_symbolic) {
+            return false;
+        }
+
+        if (observed->tag != expected->tag) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool ensure_native_binding_contract(ProtoVM *vm, const ProtoNativeEntry *entry, ProtoError *error) {
+    if (!vm || !entry) {
+        return false;
+    }
+
+    if (entry->signature.binding_contract.count == 0) {
+        return true;
+    }
+    ProtoCallFrame *frame = current_frame(vm);
+    const ProtoTypeBindingSet *active = frame ? &frame->bindings : NULL;
+    if (binding_contract_satisfied(&entry->signature.binding_contract, active)) {
+        return true;
+    }
+
+    if (error && error->ok) {
+        char expected[128];
+        char actual[128];
+        proto_binding_set_format(&entry->signature.binding_contract, expected, sizeof expected);
+        proto_binding_set_format(active, actual, sizeof actual);
+        protoerror_set_code(error, PROTO_DIAG_INTEROP_SIGNATURE_MISMATCH, 0, "Native '%s' binding contract violated", entry->name);
+        protoerror_set_message_key(error, "runtime.native.bindingContract");
+        protoerror_set_hint(error, "expected %s but active specialization provided %s", expected, actual);
+    }
+
+    return false;
+}
+
+static bool protovm_verify_binding_contracts(ProtoVM *vm, const ProtoChunk *chunk, ProtoError *error) {
+    if (!vm || !chunk) {
+        return false;
+    }
+    if (chunk->binding_entry_count == 0) {
+        return true;
+    }
+    if (!error) {
+        return false;
+    }
+
+    for (size_t i = 0; i < chunk->binding_entry_count; ++i) {
+        const ProtoBindingMapEntry *entry = &chunk->binding_entries[i];
+        size_t slot = (size_t)entry->symbol_index;
+        const char *global_name = (slot < chunk->globals_count && chunk->globals && chunk->globals[slot]) ? chunk->globals[slot] : "<global>";
+
+        if (slot >= chunk->globals_count) {
+            protoerror_set_code(error, PROTO_DIAG_GENERIC_BINDING_MISMATCH, 0, "Binding metadata references invalid global index %u", (unsigned)slot);
+            protoerror_set_message_key(error, "runtime.binding.invalidGlobal");
+            return false;
+        }
+        if (slot >= PROTOHACK_MAX_GLOBALS || !vm->globals_initialized[slot]) {
+            protoerror_set_code(error, PROTO_DIAG_GENERIC_BINDING_MISMATCH, 0, "Global '%s' was not initialized for binding enforcement", global_name);
+            protoerror_set_message_key(error, "runtime.binding.uninitialized");
+            return false;
+        }
+
+        const ProtoValue *value = &vm->globals[slot];
+        if (value->type != PROTO_VAL_FUNCTION || !value->as.function) {
+            protoerror_set_code(error, PROTO_DIAG_GENERIC_BINDING_MISMATCH, 0, "Global '%s' did not resolve to a function specialization", global_name);
+            protoerror_set_message_key(error, "runtime.binding.nonFunction");
+            return false;
+        }
+
+        const ProtoFunction *function = value->as.function;
+        if (!binding_sets_equal(&function->bindings, &entry->bindings)) {
+            char expected[128];
+            char actual[128];
+            proto_binding_set_format(&entry->bindings, expected, sizeof expected);
+            proto_binding_set_format(&function->bindings, actual, sizeof actual);
+            protoerror_set_code(error, PROTO_DIAG_GENERIC_BINDING_CONFLICT, 0, "Global '%s' binding mismatch", global_name);
+            protoerror_set_message_key(error, "runtime.binding.conflict");
+            protoerror_set_hint(error, "expected %s but module initialized with %s", expected, actual);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+typedef struct {
+    ProtoFunction **items;
+    size_t count;
+    size_t capacity;
+} ProtoFunctionList;
+
+typedef struct {
+    char base[256];
+    ProtoFunctionKind kind;
+    uint8_t type_param_count;
+    ProtoFunction *function;
+} ProtoTemplateRecord;
+
+typedef struct {
+    ProtoTemplateRecord *entries;
+    size_t count;
+    size_t capacity;
+} ProtoTemplateRegistry;
+
+static bool function_list_append_unique(ProtoFunctionList *list, ProtoFunction *function) {
+    if (!list || !function) {
+        return true;
+    }
+    for (size_t i = 0; i < list->count; ++i) {
+        if (list->items[i] == function) {
+            return true;
+        }
+    }
+    size_t new_count = list->count + 1;
+    if (new_count > list->capacity) {
+        size_t new_capacity = list->capacity == 0 ? 16u : list->capacity * 2u;
+        ProtoFunction **resized = (ProtoFunction **)realloc(list->items, new_capacity * sizeof *resized);
+        if (!resized) {
+            return false;
+        }
+        list->items = resized;
+        list->capacity = new_capacity;
+    }
+    list->items[list->count++] = function;
+    return true;
+}
+
+static bool collect_functions_from_chunk(const ProtoChunk *chunk, ProtoFunctionList *list) {
+    if (!chunk || !list) {
+        return true;
+    }
+    for (size_t i = 0; i < chunk->constants_count; ++i) {
+        const ProtoValue *value = &chunk->constants[i];
+        if (value->type != PROTO_VAL_FUNCTION) {
+            continue;
+        }
+        ProtoFunction *fn = value->as.function;
+        if (!fn) {
+            continue;
+        }
+        if (!function_list_append_unique(list, fn)) {
+            return false;
+        }
+        if (!collect_functions_from_chunk(&fn->chunk, list)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool function_base_name(const ProtoFunction *function, char *buffer, size_t buffer_size) {
+    if (!buffer || buffer_size == 0) {
+        return false;
+    }
+    buffer[0] = '\0';
+    if (!function || !function->name) {
+        return false;
+    }
+    const char *name = function->name;
+    const char *angle = strchr(name, '<');
+    size_t length = angle ? (size_t)(angle - name) : strlen(name);
+    if (length >= buffer_size) {
+        length = buffer_size - 1;
+    }
+    if (length == 0) {
+        return false;
+    }
+    memcpy(buffer, name, length);
+    buffer[length] = '\0';
+    return true;
+}
+
+static bool template_registry_add(ProtoTemplateRegistry *registry, ProtoFunction *function) {
+    if (!registry || !function || function->type_param_count == 0) {
+        return true;
+    }
+    char base[256];
+    if (!function_base_name(function, base, sizeof base)) {
+        return true;
+    }
+    for (size_t i = 0; i < registry->count; ++i) {
+        ProtoTemplateRecord *record = &registry->entries[i];
+        if (record->function == function) {
+            return true;
+        }
+        if (record->kind == function->kind && record->type_param_count == function->type_param_count && strcmp(record->base, base) == 0) {
+            return true;
+        }
+    }
+    size_t new_count = registry->count + 1;
+    if (new_count > registry->capacity) {
+        size_t new_capacity = registry->capacity == 0 ? 16u : registry->capacity * 2u;
+        ProtoTemplateRecord *resized = (ProtoTemplateRecord *)realloc(registry->entries, new_capacity * sizeof *resized);
+        if (!resized) {
+            return false;
+        }
+        registry->entries = resized;
+        registry->capacity = new_capacity;
+    }
+    ProtoTemplateRecord *record = &registry->entries[registry->count++];
+    strncpy(record->base, base, sizeof record->base - 1);
+    record->base[sizeof record->base - 1] = '\0';
+    record->kind = function->kind;
+    record->type_param_count = function->type_param_count;
+    record->function = function;
+    return true;
+}
+
+static ProtoFunction *template_registry_find(const ProtoTemplateRegistry *registry, ProtoFunctionKind kind, const char *base, uint8_t type_param_count) {
+    if (!registry || !base) {
+        return NULL;
+    }
+    for (size_t i = 0; i < registry->count; ++i) {
+        const ProtoTemplateRecord *record = &registry->entries[i];
+        if (record->kind == kind && record->type_param_count == type_param_count && strcmp(record->base, base) == 0) {
+            return record->function;
+        }
+    }
+    return NULL;
+}
+
+static void template_registry_free(ProtoTemplateRegistry *registry) {
+    if (!registry) {
+        return;
+    }
+    free(registry->entries);
+    registry->entries = NULL;
+    registry->capacity = 0;
+    registry->count = 0;
+}
+
+static void function_list_free(ProtoFunctionList *list) {
+    if (!list) {
+        return;
+    }
+    free(list->items);
+    list->items = NULL;
+    list->capacity = 0;
+    list->count = 0;
+}
+
+static void protovm_seed_chunk_specializations(ProtoVM *vm, const ProtoChunk *chunk) {
+    if (!vm || !chunk) {
+        return;
+    }
+
+    ProtoFunctionList functions = {0};
+    if (!collect_functions_from_chunk(chunk, &functions)) {
+        function_list_free(&functions);
+        return;
+    }
+
+    ProtoTemplateRegistry registry = {0};
+    for (size_t i = 0; i < functions.count; ++i) {
+        ProtoFunction *fn = functions.items[i];
+        if (!template_registry_add(&registry, fn)) {
+            template_registry_free(&registry);
+            function_list_free(&functions);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < functions.count; ++i) {
+        ProtoFunction *fn = functions.items[i];
+        if (!fn) {
+            continue;
+        }
+        if (fn->bindings.count == 0) {
+            continue;
+        }
+        if (!binding_set_fully_concrete(&fn->bindings)) {
+            continue;
+        }
+        const ProtoFunction *origin = fn->template_origin;
+        if (!origin) {
+            char base[256];
+            if (function_base_name(fn, base, sizeof base)) {
+                ProtoFunction *resolved = template_registry_find(&registry, fn->kind, base, fn->type_param_count);
+                if (resolved && resolved != fn) {
+                    origin = resolved;
+                    fn->template_origin = resolved;
+                }
+            }
+        }
+        if (!origin || origin == fn) {
+            continue;
+        }
+        protovm_register_specialization(vm, origin, &fn->bindings, fn, false);
+    }
+
+    template_registry_free(&registry);
+    function_list_free(&functions);
+}
+
+static bool resolve_binding_via_stack(const ProtoVM *vm, size_t caller_index, int8_t param_index, ProtoTypeBinding *out) {
+    if (!vm || !out || param_index < 0) {
+        return false;
+    }
+    int8_t current = param_index;
+    for (ptrdiff_t frame_index = (ptrdiff_t)caller_index; frame_index >= 0 && current >= 0; --frame_index) {
+        const ProtoCallFrame *frame = &vm->frames[frame_index];
+        if (!frame || current < 0) {
+            break;
+        }
+        if ((uint8_t)current >= frame->bindings.count || frame->bindings.count > PROTOHACK_MAX_TYPE_PARAMS) {
+            return false;
+        }
+        ProtoTypeBinding candidate = frame->bindings.entries[current];
+        if (candidate.tag != PROTO_TYPE_ANY || candidate.param < 0) {
+            *out = candidate;
+            return true;
+        }
+        if (candidate.param == current) {
+            /* Prevent infinite loops when bindings self-reference without progress */
+            continue;
+        }
+        current = candidate.param;
+    }
+    return false;
+}
+
+static bool resolve_bindings_for_call(const ProtoVM *vm, const ProtoFunction *function, ProtoTypeBindingSet *out) {
+    if (!function || !out) {
+        return false;
+    }
+    if (function->bindings.count == 0) {
+        out->count = 0;
+        for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            out->entries[i].tag = PROTO_TYPE_ANY;
+            out->entries[i].param = -1;
+        }
+        return false;
+    }
+
+    binding_set_copy(out, &function->bindings);
+
+    if (!vm || vm->frame_count == 0) {
+        return true;
+    }
+
+    size_t caller_index = (size_t)(vm->frame_count - 1);
+    for (uint8_t i = 0; i < out->count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        ProtoTypeBinding *binding = &out->entries[i];
+        if (binding->tag == PROTO_TYPE_ANY && binding->param >= 0) {
+            ProtoTypeBinding resolved;
+            if (resolve_binding_via_stack(vm, caller_index, binding->param, &resolved)) {
+                *binding = resolved;
+            }
+        }
+    }
+    return true;
+}
+
+static void apply_bindings_to_function(ProtoFunction *function, const ProtoTypeBindingSet *bindings) {
+    if (!function || !bindings) {
+        return;
+    }
+    function->bindings = *bindings;
+
+    ProtoTypeTag argument_tags[PROTOHACK_MAX_TYPE_PARAMS];
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        argument_tags[i] = PROTO_TYPE_ANY;
+    }
+
+    uint8_t count = bindings->count;
+    if (count > PROTOHACK_MAX_TYPE_PARAMS) {
+        count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+        if (bindings->entries[i].tag != PROTO_TYPE_ANY && bindings->entries[i].param < 0) {
+            argument_tags[i] = bindings->entries[i].tag;
+        }
+    }
+
+    proto_function_set_type_arguments(function, argument_tags, count);
+
+    for (uint8_t i = 0; i < function->arity && i < PROTOHACK_MAX_PARAMS; ++i) {
+        int8_t binding_index = function->param_type_params[i];
+        if (binding_index >= 0 && (uint8_t)binding_index < count) {
+            const ProtoTypeBinding *binding = &bindings->entries[binding_index];
+            if (binding->tag != PROTO_TYPE_ANY && binding->param < 0) {
+                function->param_types[i] = binding->tag;
+            }
+        }
+    }
+
+    if (function->return_type_param >= 0 && (uint8_t)function->return_type_param < count) {
+        const ProtoTypeBinding *binding = &bindings->entries[function->return_type_param];
+        if (binding->tag != PROTO_TYPE_ANY && binding->param < 0) {
+            function->return_type = binding->tag;
+        }
+    }
+}
+
+static ProtoFunction *instantiate_runtime_specialization(ProtoVM *vm, const ProtoFunction *template_function, const ProtoTypeBindingSet *bindings, ProtoError *error) {
+    if (!vm || !template_function || !bindings) {
+        if (error) {
+            protoerror_set(error, 0, "Invalid specialization request");
+        }
+        return NULL;
+    }
+
+    const ProtoFunction *origin = template_function->template_origin ? template_function->template_origin : template_function;
+
+    ProtoFunction *specialization = proto_function_copy(origin);
+    if (!specialization) {
+        if (error) {
+            protoerror_set(error, 0, "Failed to clone template during specialization");
+        }
+        return NULL;
+    }
+
+    specialization->template_origin = origin;
+    apply_bindings_to_function(specialization, bindings);
+
+    char name_buffer[256];
+    if (proto_function_format_specialization_name(NULL, origin, bindings, NULL, 0, name_buffer, sizeof name_buffer)) {
+        proto_function_set_name(specialization, name_buffer);
+    }
+
+    if (!protovm_register_specialization(vm, origin, bindings, specialization, true)) {
+        proto_function_free(specialization);
+        if (error) {
+            protoerror_set(error, 0, "Specialization table overflow");
+        }
+        return NULL;
+    }
+
+    return specialization;
+}
+
+ProtoFunction *protovm_find_specialization(const ProtoVM *vm, const ProtoFunction *template_function, const ProtoTypeBindingSet *bindings) {
+    if (!vm || !template_function || !bindings) {
+        return NULL;
+    }
+    uint64_t fingerprint = binding_set_fingerprint(template_function, bindings);
+    for (size_t i = 0; i < vm->specializations.count; ++i) {
+        const ProtoSpecializationEntry *entry = &vm->specializations.entries[i];
+        if (entry->template_function == template_function && entry->fingerprint == fingerprint && binding_sets_equal(&entry->bindings, bindings)) {
+            return entry->specialization;
+        }
+    }
+    return NULL;
+}
+
+bool protovm_register_specialization(ProtoVM *vm, const ProtoFunction *template_function, const ProtoTypeBindingSet *bindings, ProtoFunction *specialization, bool take_ownership) {
+    if (!vm || !template_function || !bindings || !specialization) {
+        return false;
+    }
+    uint64_t fingerprint = binding_set_fingerprint(template_function, bindings);
+    ProtoFunction *existing = protovm_find_specialization(vm, template_function, bindings);
+    if (existing) {
+        for (size_t i = 0; i < vm->specializations.count; ++i) {
+            ProtoSpecializationEntry *entry = &vm->specializations.entries[i];
+            if (entry->template_function == template_function && entry->fingerprint == fingerprint && binding_sets_equal(&entry->bindings, bindings)) {
+                entry->specialization = specialization;
+                entry->bindings = *bindings;
+                entry->fingerprint = fingerprint;
+                entry->owned = take_ownership;
+                return true;
+            }
+        }
+        return true;
+    }
+    if (vm->specializations.count >= PROTOHACK_MAX_SPECIALIZATIONS) {
+        return false;
+    }
+    ProtoSpecializationEntry *entry = &vm->specializations.entries[vm->specializations.count++];
+    entry->template_function = template_function;
+    entry->bindings = *bindings;
+    entry->specialization = specialization;
+    entry->fingerprint = fingerprint;
+    entry->owned = take_ownership;
+    return true;
+}
+
+void protovm_clear_specializations(ProtoVM *vm, bool free_specializations) {
+    if (!vm) {
+        return;
+    }
+    if (free_specializations) {
+        for (size_t i = 0; i < vm->specializations.count; ++i) {
+            ProtoSpecializationEntry *entry = &vm->specializations.entries[i];
+            if (entry->owned && entry->specialization && entry->specialization != entry->template_function) {
+                proto_function_free(entry->specialization);
+            }
+            entry->specialization = NULL;
+            entry->owned = false;
+        }
+    }
+    vm->specializations.count = 0;
+}
 
 static ProtoCallFrame *current_frame(ProtoVM *vm) {
     PROTOHACK_ASSERT(vm && vm->frame_count > 0, "VM has no active frames");
@@ -39,7 +657,24 @@ static void stack_push(ProtoVM *vm, ProtoValue value) {
 static ProtoValue stack_pop(ProtoVM *vm) {
     PROTOHACK_ASSERT(vm->stack_top > vm->stack, "Stack underflow");
     vm->stack_top--;
+    size_t index = (size_t)(vm->stack_top - vm->stack);
+    vm->stack_generation[index]++;
     return *vm->stack_top;
+}
+
+static bool stack_pointer_valid(const ProtoVM *vm, const ProtoPointer *pointer, size_t *out_index) {
+    if (!vm || !pointer || pointer->kind != PROTO_POINTER_STACK || !pointer->as.stack.slot) {
+        return false;
+    }
+    ptrdiff_t diff = pointer->as.stack.slot - vm->stack;
+    if (diff < 0 || diff >= (ptrdiff_t)PROTOHACK_STACK_MAX) {
+        return false;
+    }
+    size_t index = (size_t)diff;
+    if (out_index) {
+        *out_index = index;
+    }
+    return vm->stack_generation[index] == pointer->as.stack.generation;
 }
 
 #if PROTOHACK_ENABLE_JIT
@@ -96,6 +731,9 @@ static bool call_native(ProtoVM *vm, uint8_t native_index, uint8_t arg_count, Pr
     }
 
     const ProtoNativeEntry *entry = &table[native_index];
+    if (!ensure_native_binding_contract(vm, entry, error)) {
+        return false;
+    }
     ProtoValue args_buffer[PROTOHACK_MAX_NATIVE_ARGS];
     for (uint8_t i = 0; i < arg_count; ++i) {
         args_buffer[arg_count - i - 1] = stack_pop(vm);
@@ -117,7 +755,7 @@ static bool call_native(ProtoVM *vm, uint8_t native_index, uint8_t arg_count, Pr
     return true;
 }
 
-static bool call_function(ProtoVM *vm, const ProtoFunction *function, uint8_t arg_count, ProtoError *error) {
+static bool call_function(ProtoVM *vm, const ProtoFunction *function, const ProtoTypeBindingSet *bindings, uint8_t arg_count, ProtoError *error) {
     if (!function) {
         protoerror_set(error, 0, "Attempted to call null function");
         return false;
@@ -136,6 +774,11 @@ static bool call_function(ProtoVM *vm, const ProtoFunction *function, uint8_t ar
     frame->function = function;
     frame->ip = 0;
     frame->slots = vm->stack_top - arg_count - 1;
+    if (bindings) {
+        binding_set_copy(&frame->bindings, bindings);
+    } else {
+        binding_set_copy(&frame->bindings, &function->bindings);
+    }
     return true;
 }
 
@@ -147,8 +790,38 @@ static bool call_value(ProtoVM *vm, ProtoValue callee, uint8_t arg_count, ProtoE
     }
 
     switch (callee.type) {
-        case PROTO_VAL_FUNCTION:
-            return call_function(vm, callee.as.function, arg_count, error);
+        case PROTO_VAL_FUNCTION: {
+            ProtoFunction *function = callee.as.function;
+            if (!function) {
+                protoerror_set(error, 0, "Attempted to call null function");
+                return false;
+            }
+            const ProtoFunction *dispatch = function;
+            ProtoTypeBindingSet resolved_bindings;
+            bool has_bindings = resolve_bindings_for_call(vm, function, &resolved_bindings);
+            bool function_bindings_concrete = binding_set_fully_concrete(&function->bindings);
+
+            if (has_bindings && binding_set_fully_concrete(&resolved_bindings) && !function_bindings_concrete) {
+                const ProtoFunction *origin = function->template_origin ? function->template_origin : function;
+                ProtoFunction *specialization = protovm_find_specialization(vm, origin, &resolved_bindings);
+                if (!specialization) {
+                    specialization = instantiate_runtime_specialization(vm, function, &resolved_bindings, error);
+                    if (!specialization) {
+                        return false;
+                    }
+                }
+                dispatch = specialization;
+                proto_value_free(callee_slot);
+                *callee_slot = proto_value_function(specialization);
+                return call_function(vm, dispatch, &dispatch->bindings, arg_count, error);
+            }
+
+            if (has_bindings) {
+                return call_function(vm, dispatch, &resolved_bindings, arg_count, error);
+            }
+
+            return call_function(vm, dispatch, &dispatch->bindings, arg_count, error);
+        }
         case PROTO_VAL_CLASS: {
             ProtoClass *klass = callee.as.klass;
             ProtoInstance *instance = proto_instance_new(klass);
@@ -164,7 +837,7 @@ static bool call_value(ProtoVM *vm, ProtoValue callee, uint8_t arg_count, ProtoE
                                    initializer->arity, arg_count);
                     return false;
                 }
-                return call_function(vm, initializer, arg_count, error);
+                return call_function(vm, initializer, &initializer->bindings, arg_count, error);
             }
 
             if (arg_count != 0) {
@@ -183,7 +856,7 @@ static bool call_value(ProtoVM *vm, ProtoValue callee, uint8_t arg_count, ProtoE
             *callee_slot = proto_value_instance(receiver);
             proto_instance_release(receiver);
 
-            bool ok = call_function(vm, method, arg_count, error);
+            bool ok = call_function(vm, method, &method->bindings, arg_count, error);
             proto_bound_method_release(bound);
             return ok;
         }
@@ -206,6 +879,10 @@ void protovm_init(ProtoVM *vm) {
     for (size_t i = 0; i < PROTOHACK_STACK_MAX; ++i) {
         vm->stack[i] = proto_value_null();
     }
+
+    for (size_t i = 0; i < PROTOHACK_STACK_MAX; ++i) {
+        vm->stack_generation[i] = 0u;
+    }
     for (size_t i = 0; i < PROTOHACK_MAX_GLOBALS; ++i) {
         vm->globals[i] = proto_value_null();
         vm->globals_initialized[i] = false;
@@ -215,6 +892,7 @@ void protovm_init(ProtoVM *vm) {
 #if PROTOHACK_ENABLE_JIT
     protojit_profiler_init(&vm->profiler);
 #endif
+    vm->specializations.count = 0;
     protovm_register_stdlib(vm);
 }
 
@@ -228,6 +906,9 @@ void protovm_reset(ProtoVM *vm) {
     }
     vm->frame_count = 0;
 
+    for (size_t i = 0; i < PROTOHACK_STACK_MAX; ++i) {
+        vm->stack_generation[i] = 0u;
+    }
     for (size_t i = 0; i < vm->globals_count; ++i) {
         if (vm->globals_initialized[i]) {
             proto_value_free(&vm->globals[i]);
@@ -238,6 +919,8 @@ void protovm_reset(ProtoVM *vm) {
 
     proto_value_free(&vm->last_print_value);
     vm->last_print_value = proto_value_null();
+
+    protovm_clear_specializations(vm, true);
 }
 
 const ProtoValue *protovm_last_print(const ProtoVM *vm) {
@@ -257,6 +940,8 @@ bool protovm_run(ProtoVM *vm, const ProtoChunk *chunk, ProtoError *error) {
 
     protoerror_reset(error);
 
+    protovm_seed_chunk_specializations(vm, chunk);
+
     ProtoFunction script = {0};
     script.kind = PROTO_FUNC_SCRIPT;
     script.arity = 0;
@@ -269,7 +954,10 @@ bool protovm_run(ProtoVM *vm, const ProtoChunk *chunk, ProtoError *error) {
     vm->frames[vm->frame_count++] = (ProtoCallFrame){
         .function = &script,
         .ip = 0,
-        .slots = vm->stack
+        .slots = vm->stack,
+        .bindings = {
+            .count = 0
+        }
     };
 
     while (vm->frame_count > 0) {
@@ -285,6 +973,9 @@ bool protovm_run(ProtoVM *vm, const ProtoChunk *chunk, ProtoError *error) {
             vm->frame_count--;
             if (vm->frame_count == 0) {
                 proto_value_free(&result);
+                if (!protovm_verify_binding_contracts(vm, chunk, error)) {
+                    return false;
+                }
                 return true;
             }
             vm->stack_top = current_frame(vm)->slots;
@@ -366,6 +1057,136 @@ bool protovm_run(ProtoVM *vm, const ProtoChunk *chunk, ProtoError *error) {
                 ProtoValue value = proto_value_copy(stack_peek(vm, 0));
                 proto_value_free(&frame->slots[slot]);
                 frame->slots[slot] = value;
+                break;
+            }
+            case PROTO_OP_ADDR_LOCAL: {
+                uint8_t slot = frame_read_byte(frame);
+                uint8_t flags = frame_read_byte(frame);
+                ProtoValue *target = &frame->slots[slot];
+                ptrdiff_t diff = target - vm->stack;
+                if (diff < 0 || diff >= (ptrdiff_t)PROTOHACK_STACK_MAX) {
+                    protoerror_set(error, line, "Pointer target out of range");
+                    return false;
+                }
+                size_t index = (size_t)diff;
+                ProtoPointer pointer = {0};
+                pointer.kind = PROTO_POINTER_STACK;
+                pointer.is_const = (flags & 1u) != 0u;
+                pointer.as.stack.slot = target;
+                pointer.as.stack.generation = vm->stack_generation[index];
+                stack_push(vm, proto_value_pointer(pointer));
+                break;
+            }
+            case PROTO_OP_ADDR_GLOBAL: {
+                uint16_t slot = frame_read_short(frame);
+                uint8_t flags = frame_read_byte(frame);
+                if (slot >= active_chunk->globals_count || slot >= PROTOHACK_MAX_GLOBALS) {
+                    protoerror_set(error, line, "Invalid global index for pointer");
+                    return false;
+                }
+                ProtoPointer pointer = {0};
+                pointer.kind = PROTO_POINTER_GLOBAL;
+                pointer.is_const = (flags & 1u) != 0u;
+                pointer.as.global.slot = &vm->globals[slot];
+                pointer.as.global.initialized = &vm->globals_initialized[slot];
+                pointer.as.global.index = slot;
+                stack_push(vm, proto_value_pointer(pointer));
+                break;
+            }
+            case PROTO_OP_PTR_LOAD: {
+                ProtoValue pointer_value = stack_pop(vm);
+                if (pointer_value.type != PROTO_VAL_POINTER) {
+                    protoerror_set(error, line, "Cannot dereference non-pointer value");
+                    proto_value_free(&pointer_value);
+                    return false;
+                }
+                ProtoPointer pointer = pointer_value.as.pointer;
+                ProtoValue result = proto_value_null();
+                switch (pointer.kind) {
+                    case PROTO_POINTER_STACK: {
+                        size_t index = 0;
+                        if (!stack_pointer_valid(vm, &pointer, &index)) {
+                            protoerror_set(error, line, "Dangling pointer dereference");
+                            proto_value_free(&pointer_value);
+                            return false;
+                        }
+                        result = proto_value_copy(pointer.as.stack.slot);
+                        break;
+                    }
+                    case PROTO_POINTER_GLOBAL: {
+                        if (!pointer.as.global.initialized || !*pointer.as.global.initialized) {
+                            protoerror_set(error, line, "Pointer to uninitialized global");
+                            proto_value_free(&pointer_value);
+                            return false;
+                        }
+                        result = proto_value_copy(pointer.as.global.slot);
+                        break;
+                    }
+                    default:
+                        protoerror_set(error, line, "Unsupported pointer dereference");
+                        proto_value_free(&pointer_value);
+                        return false;
+                }
+                proto_value_free(&pointer_value);
+                stack_push(vm, result);
+                break;
+            }
+            case PROTO_OP_PTR_STORE: {
+                ProtoValue value = stack_pop(vm);
+                ProtoValue pointer_value = stack_pop(vm);
+                if (pointer_value.type != PROTO_VAL_POINTER) {
+                    protoerror_set(error, line, "Cannot assign through non-pointer value");
+                    proto_value_free(&pointer_value);
+                    proto_value_free(&value);
+                    return false;
+                }
+                ProtoPointer pointer = pointer_value.as.pointer;
+                if (pointer.is_const) {
+                    protoerror_set(error, line, "Cannot assign through pointer to const");
+                    proto_value_free(&pointer_value);
+                    proto_value_free(&value);
+                    return false;
+                }
+                switch (pointer.kind) {
+                    case PROTO_POINTER_STACK: {
+                        size_t index = 0;
+                        if (!stack_pointer_valid(vm, &pointer, &index)) {
+                            protoerror_set(error, line, "Dangling pointer assignment");
+                            proto_value_free(&pointer_value);
+                            proto_value_free(&value);
+                            return false;
+                        }
+                        proto_value_free(pointer.as.stack.slot);
+                        *pointer.as.stack.slot = proto_value_copy(&value);
+                        break;
+                    }
+                    case PROTO_POINTER_GLOBAL: {
+                        if (!pointer.as.global.slot || pointer.as.global.index >= PROTOHACK_MAX_GLOBALS) {
+                            protoerror_set(error, line, "Invalid global pointer assignment");
+                            proto_value_free(&pointer_value);
+                            proto_value_free(&value);
+                            return false;
+                        }
+                        proto_value_free(pointer.as.global.slot);
+                        *pointer.as.global.slot = proto_value_copy(&value);
+                        if (pointer.as.global.initialized) {
+                            *pointer.as.global.initialized = true;
+                        }
+                        if (pointer.as.global.index + 1 > vm->globals_count) {
+                            vm->globals_count = pointer.as.global.index + 1;
+                        }
+                        break;
+                    }
+                    default:
+                        protoerror_set(error, line, "Unsupported pointer assignment");
+                        proto_value_free(&pointer_value);
+                        proto_value_free(&value);
+                        return false;
+                }
+                ProtoValue result = proto_value_copy(&value);
+                proto_value_free(&pointer_value);
+                stack_push(vm, result);
+                proto_value_free(&value);
                 break;
             }
             case PROTO_OP_ADD: {
