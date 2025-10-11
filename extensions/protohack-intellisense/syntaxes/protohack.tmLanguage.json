@@ -20,6 +20,12 @@
     },
     {
       "include": "#functions"
+    },
+    {
+      "include": "#functionCalls"
+    },
+    {
+      "include": "#classDeclarations"
     }
   ],
   "repository": {
@@ -53,7 +59,7 @@
     },
     "keywords": {
       "name": "keyword.control.protohack",
-  "match": "\\b(?:let|const|craft|class|yield|if|else|while|for|break|continue|return|and|or|true|false|null|this|carve|etch|probe|inc)\\b"
+      "match": "\\b(?:let|const|craft|class|yield|if|else|while|for|break|continue|return|and|or|true|false|null|this|carve|etch|probe|inc)\\b"
     },
     "types": {
       "name": "support.type.protohack",
@@ -71,6 +77,43 @@
           "beginCaptures": {
             "1": {
               "name": "entity.name.function.craft.protohack"
+            }
+          },
+          "end": "{",
+          "patterns": []
+        },
+        {
+          "name": "entity.name.function.method.protohack",
+          "match": "^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.method.protohack"
+            }
+          }
+        }
+      ]
+    },
+    "functionCalls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.protohack",
+          "match": "(^|[^\\.])\\b([A-Za-z_][A-Za-z0-9_]*)[ \t]*(?=\\()",
+          "captures": {
+            "2": {
+              "name": "entity.name.function.call.protohack"
+            }
+          }
+        }
+      ]
+    },
+    "classDeclarations": {
+      "patterns": [
+        {
+          "name": "entity.name.type.class.protohack",
+          "begin": "\\bclass\\s+([A-Za-z_][\\w]*)",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.type.class.protohack"
             }
           },
           "end": "{",
