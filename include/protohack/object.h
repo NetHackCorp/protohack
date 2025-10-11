@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "protohack/config.h"
 #include "protohack/types.h"
 
 #ifdef __cplusplus
@@ -29,6 +30,7 @@ ProtoClass *proto_class_new(const char *name);
 void proto_class_retain(ProtoClass *klass);
 void proto_class_release(ProtoClass *klass);
 const char *proto_class_name(const ProtoClass *klass);
+bool proto_class_set_type_params(ProtoClass *klass, const char *const *params, uint8_t count);
 bool proto_class_add_method(ProtoClass *klass, const char *name, ProtoFunction *function);
 ProtoFunction *proto_class_find_method(const ProtoClass *klass, const char *name);
 
