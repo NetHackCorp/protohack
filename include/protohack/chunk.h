@@ -4,7 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "protohack/binding.h"
 #include "protohack/config.h"
+#include "protohack/extension.h"
 #include "protohack/value.h"
 
 #ifdef __cplusplus
@@ -12,6 +14,11 @@ extern "C" {
 #endif
 
 struct ProtoJITIR;
+
+typedef struct ProtoBindingMapEntry {
+    uint32_t symbol_index;
+    ProtoTypeBindingSet bindings;
+} ProtoBindingMapEntry;
 
 typedef struct ProtoChunk {
     uint8_t *code;
@@ -29,6 +36,17 @@ typedef struct ProtoChunk {
     size_t *lines;
     size_t lines_count;
     size_t lines_capacity;
+
+    ProtoBindingMapEntry *binding_entries;
+    size_t binding_entry_count;
+    size_t binding_entry_capacity;
+
+    uint32_t module_version;
+    uint32_t module_flags;
+
+    ProtoExtensionDecl *extensions;
+    size_t extension_count;
+    size_t extension_capacity;
 
 #if PROTOHACK_ENABLE_JIT
     struct ProtoJITIR **jit_cache;
