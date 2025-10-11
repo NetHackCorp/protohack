@@ -30,6 +30,10 @@ static const char *opcode_name(ProtoOpCode opcode) {
         case PROTO_OP_CALL_NATIVE: return "CALL_NATIVE";
         case PROTO_OP_GET_LOCAL: return "GET_LOCAL";
         case PROTO_OP_SET_LOCAL: return "SET_LOCAL";
+    case PROTO_OP_ADDR_LOCAL: return "ADDR_LOCAL";
+    case PROTO_OP_ADDR_GLOBAL: return "ADDR_GLOBAL";
+    case PROTO_OP_PTR_LOAD: return "PTR_LOAD";
+    case PROTO_OP_PTR_STORE: return "PTR_STORE";
         case PROTO_OP_CALL: return "CALL";
         case PROTO_OP_ALLOC_TYPED: return "ALLOC_TYPED";
         case PROTO_OP_STORE_TYPED: return "STORE_TYPED";
