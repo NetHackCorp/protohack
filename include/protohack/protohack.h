@@ -10,6 +10,7 @@
 #include "protohack/typed_memory.h"
 #include "protohack/error.h"
 #include "protohack/native.h"
+#include "protohack/extension.h"
 #include "protohack/compiler.h"
 #include "protohack/vm.h"
 #include "protohack/serialize.h"
