@@ -78,6 +78,9 @@ ProtoJITIR *protojit_ir_compile(const ProtoChunk *chunk, const ProtoJITBlock *bl
                 op->operand_u16 = protojit_read_u16(&chunk->code[ip + 1u]);
             } else if (operand_width == 1u) {
                 op->operand_u8 = chunk->code[ip + 1u];
+            } else if (operand_width == 3u) {
+                op->operand_u16 = protojit_read_u16(&chunk->code[ip + 1u]);
+                op->operand_u8 = chunk->code[ip + 3u];
             }
         }
 
