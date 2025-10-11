@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <ctype.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -122,8 +123,78 @@ static size_t caret_visual_offset(const char *line_start, const char *line_end, 
     return offset;
 }
 
+static bool equals_ignore_case(const char *lhs, const char *rhs) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    while (*lhs && *rhs) {
+        unsigned char a = (unsigned char)*lhs++;
+        unsigned char b = (unsigned char)*rhs++;
+        if (toupper(a) != toupper(b)) {
+            return false;
+        }
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+static void json_escape_into(const char *input, char *output, size_t output_size) {
+    if (!output || output_size == 0) {
+        return;
+    }
+    if (!input) {
+        output[0] = '\0';
+        return;
+    }
+
+    size_t written = 0;
+    for (const unsigned char *cursor = (const unsigned char *)input; *cursor != '\0'; ++cursor) {
+        const char *escape = NULL;
+        char buffer[7] = {0};
+        switch (*cursor) {
+            case '\\': escape = "\\\\"; break;
+            case '"': escape = "\\\""; break;
+            case '\b': escape = "\\b"; break;
+            case '\f': escape = "\\f"; break;
+            case '\n': escape = "\\n"; break;
+            case '\r': escape = "\\r"; break;
+            case '\t': escape = "\\t"; break;
+            default:
+                if (*cursor < 0x20) {
+                    snprintf(buffer, sizeof buffer, "\\u%04x", (unsigned int)*cursor);
+                    escape = buffer;
+                }
+                break;
+        }
+        const char *chunk = escape ? escape : (const char *)cursor;
+        size_t chunk_len = escape ? strlen(escape) : 1;
+        if (written + chunk_len >= output_size) {
+            break;
+        }
+        memcpy(output + written, chunk, chunk_len);
+        written += chunk_len;
+    }
+
+    if (written < output_size) {
+        output[written] = '\0';
+    } else {
+        output[output_size - 1] = '\0';
+    }
+}
+
 static void print_error_with_context(const char *phase, const char *path, const ProtoError *error, const char *source) {
     if (!error) {
+        return;
+    }
+
+    const char *diagnostic_mode = getenv("PROTOHACK_DIAG_FORMAT");
+    if (diagnostic_mode && equals_ignore_case(diagnostic_mode, "json")) {
+        char escaped_phase[128];
+        char escaped_path[512];
+        char error_json[1024];
+        json_escape_into(phase ? phase : "", escaped_phase, sizeof escaped_phase);
+        json_escape_into(path ? path : "", escaped_path, sizeof escaped_path);
+        protoerror_to_json(error, error_json, sizeof error_json);
+        fprintf(stderr, "{\"phase\":\"%s\",\"path\":\"%s\",\"error\":%s}\n", escaped_phase, escaped_path, error_json);
         return;
     }
 
@@ -145,6 +216,14 @@ static void print_error_with_context(const char *phase, const char *path, const 
     }
 
     if (!source || error->line == 0) {
+        const char *hint = protoerror_get_hint(error);
+        if (hint && hint[0] != '\0') {
+            fprintf(stderr, "        hint: %s\n", hint);
+        }
+        ProtoDiagnosticCode code = protoerror_get_code(error);
+        if (code != PROTO_DIAG_NONE) {
+            fprintf(stderr, "        code: %s (%d)\n", protoerror_code_string(code), (int)code);
+        }
         return;
     }
 
@@ -172,6 +251,16 @@ static void print_error_with_context(const char *phase, const char *path, const 
         }
         fputc('^', stderr);
         fprintf(stderr, "\n");
+    }
+
+    const char *hint = protoerror_get_hint(error);
+    if (hint && hint[0] != '\0') {
+        fprintf(stderr, "        hint: %s\n", hint);
+    }
+
+    ProtoDiagnosticCode code = protoerror_get_code(error);
+    if (code != PROTO_DIAG_NONE) {
+        fprintf(stderr, "        code: %s (%d)\n", protoerror_code_string(code), (int)code);
     }
 }
 
