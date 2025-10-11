@@ -9,6 +9,11 @@
 static int tests_run = 0;
 static int tests_failed = 0;
 
+#define RUN_TEST(FN) do { \
+    fprintf(stderr, "RUN %s\n", #FN); \
+    run_test((FN)); \
+} while (0)
+
 static void report_failure(const char *test_name, const char *message, const ProtoError *error) {
     fprintf(stderr, "[FAIL] %s: %s", test_name, message);
     if (error && !error->ok) {
@@ -16,6 +21,45 @@ static void report_failure(const char *test_name, const char *message, const Pro
     }
     fprintf(stderr, "\n");
     tests_failed++;
+}
+
+static ProtoFunction *find_function_constant(const ProtoChunk *chunk, const char *name) {
+    if (!chunk || !name) {
+        return NULL;
+    }
+    for (size_t i = 0; i < chunk->constants_count; ++i) {
+        const ProtoValue *constant = &chunk->constants[i];
+        if (constant->type != PROTO_VAL_FUNCTION) {
+            continue;
+        }
+        ProtoFunction *function = constant->as.function;
+        if (!function || !function->name) {
+            continue;
+        }
+        if (strcmp(function->name, name) == 0) {
+            return function;
+        }
+    }
+    return NULL;
+}
+
+static void test_protoerror_json_serialization(void) {
+    ProtoError error;
+    protoerror_reset(&error);
+
+    protoerror_set_code_with_column(&error, PROTO_DIAG_NATIVE_ARG_TYPE, 12, 4, "example diagnostic");
+    protoerror_set_message_key(&error, "unit.test.example");
+    protoerror_set_hint(&error, "Review argument %d for compatibility.", 1);
+
+    char json[512];
+    protoerror_to_json(&error, json, sizeof json);
+
+    if (!strstr(json, "\"code\":3") ||
+        !strstr(json, "\"codeText\":\"native_argument_type\"") ||
+        !strstr(json, "unit.test.example") ||
+        !strstr(json, "Review argument 1")) {
+        report_failure(__func__, "JSON payload missing expected fields", NULL);
+    }
 }
 
 static void test_compile_and_run_control_flow(void) {
@@ -188,14 +232,256 @@ static void test_pack_and_extract_executable(void) {
     remove(exe_path);
 }
 
+static void test_module_header_metadata(void) {
+    const char *source = "const sample = 1;";
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoSerializedBuffer buffer = {0};
+    if (!protochunk_serialize_to_buffer(&chunk, &buffer, &error)) {
+        report_failure(__func__, "Serialization should succeed", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    size_t header_bytes = 4 + 7 * sizeof(uint32_t);
+    if (buffer.size < header_bytes) {
+        report_failure(__func__, "Serialized buffer should include module header", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (memcmp(buffer.data, PROTOHACK_BYTECODE_MAGIC, 4) != 0) {
+        report_failure(__func__, "Bytecode magic should match current format", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    uint32_t header_fields[7] = {0};
+    memcpy(header_fields, buffer.data + 4, sizeof header_fields);
+    if (header_fields[0] != PROTOHACK_MODULE_VERSION) {
+        report_failure(__func__, "Header should encode module version", NULL);
+    }
+    if (header_fields[1] != 0) {
+        report_failure(__func__, "Flags should be zero when no metadata is present", NULL);
+    }
+    if (header_fields[6] != 0) {
+        report_failure(__func__, "Binding count should default to zero", NULL);
+    }
+
+    ProtoChunk roundtrip;
+    protochunk_init(&roundtrip);
+    if (!protochunk_deserialize_from_memory(&roundtrip, buffer.data, buffer.size, &error)) {
+        report_failure(__func__, "Deserialization should succeed", &error);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&chunk);
+        protochunk_free(&roundtrip);
+        return;
+    }
+
+    if (roundtrip.module_version != PROTOHACK_MODULE_VERSION) {
+        report_failure(__func__, "Roundtrip chunk should track module version", NULL);
+    }
+    if ((roundtrip.module_flags & PROTOHACK_MODULE_FLAG_HAS_BINDING_MAP) != 0) {
+        report_failure(__func__, "Roundtrip chunk should not report binding map flag", NULL);
+    }
+    if (roundtrip.binding_entry_count != 0) {
+        report_failure(__func__, "Roundtrip binding map should be empty", NULL);
+    }
+
+    protochunk_buffer_free(&buffer);
+    protochunk_free(&roundtrip);
+    protochunk_free(&chunk);
+}
+
+static void test_extend_parser_metadata(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "\n"
+        "extend craft identity<num> with Printable (value as num) gives num {\n"
+        "  print value;\n"
+        "  yield value;\n"
+        "}\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for extend parsing", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (chunk.extension_count != 1) {
+        report_failure(__func__, "Expected a single extension declaration to be recorded", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoExtensionDecl *first = &chunk.extensions[0];
+    if (first->target_kind != PROTO_EXTENSION_TARGET_CRAFT) {
+        report_failure(__func__, "First extension should target a craft", NULL);
+    }
+    if (strcmp(first->target.name, "identity") != 0) {
+        report_failure(__func__, "First extension target name mismatch", NULL);
+    }
+    if (first->target.bindings.count != 1 || first->target.bindings.entries[0].tag != PROTO_TYPE_NUM) {
+        report_failure(__func__, "First extension should record numeric specialization", NULL);
+    }
+    if (first->trait_count != 1 || strcmp(first->traits[0].name, "Printable") != 0) {
+        report_failure(__func__, "First extension trait list mismatch", NULL);
+    }
+    if (!first->body_source || strstr(first->body_source, "yield value;") == NULL) {
+        report_failure(__func__, "First extension body should capture function source", NULL);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_extend_requires_type_arguments(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "\n"
+        "extend craft identity (value as num) gives num {\n"
+        "  yield value;\n"
+        "}\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should fail when craft extension omits type arguments", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (error.ok || !strstr(error.message, "requires 1 type argument")) {
+        report_failure(__func__, "Error message should state that craft requires type arguments", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_extend_rejects_type_arguments_for_non_generic_craft(void) {
+    const char *source =
+        "craft double(value as num) gives num {\n"
+        "  yield value + value;\n"
+        "}\n"
+        "\n"
+        "extend craft double<num> (value as num) gives num {\n"
+        "  yield value;\n"
+        "}\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should fail when non-generic craft extension supplies type arguments", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (error.ok || strstr(error.message, "does not accept type arguments") == NULL) {
+        report_failure(__func__, "Error message should state that craft is not generic", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_extend_craft_specialization_execution(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "\n"
+        "extend craft identity<num> (value as num) gives num {\n"
+        "  yield value + 10;\n"
+        "}\n"
+        "\n"
+        "let result = identity<num>(5);\n"
+        "print result;\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for craft extension override", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoVM vm;
+    protovm_init(&vm);
+    if (!protovm_run(&vm, &chunk, &error)) {
+        report_failure(__func__, "VM execution should succeed for craft extension override", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoValue *result = protovm_last_print(&vm);
+    if (!result || result->type != PROTO_VAL_NUMBER || fabs(result->as.number - 15.0) > 1e-6) {
+        report_failure(__func__, "Craft extension should modify specialization result", NULL);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_extend_craft_parameter_type_mismatch(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "\n"
+        "extend craft identity<num> (value as text) gives num {\n"
+        "  yield value;\n"
+        "}\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should fail when craft extension parameter type mismatches", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (error.ok || strstr(error.message, "parameter 1") == NULL) {
+        report_failure(__func__, "Error message should mention parameter type mismatch", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
 static void test_user_function_and_memory(void) {
     const char *source =
         "craft double(value as num) gives num {\n"
         "  yield value + value;\n"
         "}\n"
-        "let buffer = carve numeric(2);\n"
-        "etch numeric(buffer, 0, 7);\n"
-        "let output = double(probe numeric(buffer, 0));\n"
+        "let output = double(7);\n"
         "print output;\n";
 
     ProtoChunk chunk;
@@ -652,6 +938,852 @@ static void test_rand_bytes(void) {
     protochunk_free(&chunk);
 }
 
+static void test_generic_specialization_concrete_binding(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "let answer = identity<num>(42);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for concrete specialization", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *specialized = find_function_constant(&chunk, "identity<num>");
+    if (!specialized) {
+        report_failure(__func__, "Expected identity<num> specialization to be emitted", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->bindings.count != 1) {
+        report_failure(__func__, "Concrete specialization should record one binding", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoTypeBinding *binding = &specialized->bindings.entries[0];
+    if (binding->tag != PROTO_TYPE_NUM || binding->param != -1) {
+        report_failure(__func__, "Binding should resolve to num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->type_argument_count != 1 || specialized->type_arguments[0] != PROTO_TYPE_NUM) {
+        report_failure(__func__, "Type argument metadata should capture num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->arity < 1 || specialized->param_types[0] != PROTO_TYPE_NUM) {
+        report_failure(__func__, "Parameter type should be substituted with num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->return_type != PROTO_TYPE_NUM) {
+        report_failure(__func__, "Return type should be substituted with num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    char *description = proto_function_debug_description(specialized);
+    if (!description || strstr(description, "bindings{T=num") == NULL) {
+        report_failure(__func__, "Debug description should include concrete binding", NULL);
+        free(description);
+        protochunk_free(&chunk);
+        return;
+    }
+    free(description);
+
+    protochunk_free(&chunk);
+}
+
+static void test_generic_specialization_symbolic_binding(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "craft forward<U>(value as U) gives U {\n"
+        "  let alias = identity<U>;\n"
+        "  yield alias(value);\n"
+        "}\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for symbolic specialization", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *forward = find_function_constant(&chunk, "forward");
+    if (!forward) {
+        report_failure(__func__, "Expected to find craft 'forward'", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *specialized = NULL;
+    const char *actual_name = NULL;
+    for (size_t i = 0; i < forward->chunk.constants_count; ++i) {
+        const ProtoValue *constant = &forward->chunk.constants[i];
+        if (constant->type != PROTO_VAL_FUNCTION) {
+            continue;
+        }
+        ProtoFunction *fn = constant->as.function;
+        if (!fn || !fn->name) {
+            continue;
+        }
+        if (strncmp(fn->name, "identity<", 9) == 0) {
+            specialized = fn;
+            actual_name = fn->name;
+            break;
+        }
+    }
+
+    if (!specialized) {
+        report_failure(__func__, "Expected identity<…> specialization inside forward", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (strcmp(actual_name, "identity<U>") != 0) {
+        char message[256];
+        snprintf(message, sizeof message, "Specialization name mismatch: got '%s'", actual_name);
+        report_failure(__func__, message, NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->bindings.count != 1) {
+        report_failure(__func__, "Symbolic specialization should retain one binding", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoTypeBinding *binding = &specialized->bindings.entries[0];
+    if (binding->tag != PROTO_TYPE_ANY || binding->param != 0) {
+        report_failure(__func__, "Symbolic binding should reference type parameter index 0", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->type_argument_count != 1 || specialized->type_arguments[0] != PROTO_TYPE_ANY) {
+        report_failure(__func__, "Type arguments should remain symbolic", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->arity < 1 || specialized->param_types[0] != PROTO_TYPE_ANY) {
+        report_failure(__func__, "Parameter type should remain symbolic", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->return_type != PROTO_TYPE_ANY) {
+        report_failure(__func__, "Return type should remain symbolic", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    char *description = proto_function_debug_description(specialized);
+    if (!description || strstr(description, "bindings{T=&T") == NULL) {
+        report_failure(__func__, "Debug description should show symbolic binding", NULL);
+        free(description);
+        protochunk_free(&chunk);
+        return;
+    }
+    free(description);
+
+    protochunk_free(&chunk);
+}
+
+static void test_native_binding_contract_success(void) {
+    const char *source =
+        "craft binder<T>(value as T) gives T {\n"
+        "  expect_num_binding();\n"
+        "  yield value;\n"
+        "}\n"
+        "let value = binder<num>(42);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for numeric specialization", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoVM vm;
+    protovm_init(&vm);
+    if (!protovm_run(&vm, &chunk, &error)) {
+        report_failure(__func__, "VM execution should accept numeric binding contract", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_native_binding_contract_failure(void) {
+    const char *source =
+        "craft binder<T>(value as T) gives T {\n"
+        "  expect_num_binding();\n"
+        "  yield value;\n"
+        "}\n"
+        "let value = binder<text>(\"hi\");\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for symbolic specialization", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoVM vm;
+    protovm_init(&vm);
+    if (protovm_run(&vm, &chunk, &error)) {
+        report_failure(__func__, "VM execution should reject incompatible native binding", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (protoerror_get_code(&error) != PROTO_DIAG_INTEROP_SIGNATURE_MISMATCH) {
+        report_failure(__func__, "Expected interop signature mismatch diagnostic", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const char *message_key = protoerror_get_message_key(&error);
+    if (!message_key || strcmp(message_key, "runtime.native.bindingContract") != 0) {
+        report_failure(__func__, "Unexpected message key for binding contract error", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_generic_binding_map_exports(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "let alias = identity<num>;\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for binding map export", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    int alias_index = protochunk_find_global(&chunk, "alias");
+    if (alias_index < 0) {
+        report_failure(__func__, "Expected to intern alias global", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (chunk.binding_entry_count != 1) {
+        report_failure(__func__, "Module should record a single binding entry", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoBindingMapEntry *entry = NULL;
+    for (size_t i = 0; i < chunk.binding_entry_count; ++i) {
+        if (chunk.binding_entries[i].symbol_index == (uint32_t)alias_index) {
+            entry = &chunk.binding_entries[i];
+            break;
+        }
+    }
+
+    if (!entry) {
+        report_failure(__func__, "Binding map should include alias symbol", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (entry->bindings.count != 1 ||
+        entry->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        entry->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Binding entry should capture concrete num specialization", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if ((chunk.module_flags & PROTOHACK_MODULE_FLAG_HAS_BINDING_MAP) == 0) {
+        report_failure(__func__, "Module flags should mark presence of binding map", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoSerializedBuffer buffer = {0};
+    if (!protochunk_serialize_to_buffer(&chunk, &buffer, &error)) {
+        report_failure(__func__, "Serialization should succeed for binding map export", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoChunk roundtrip;
+    protochunk_init(&roundtrip);
+    if (!protochunk_deserialize_from_memory(&roundtrip, buffer.data, buffer.size, &error)) {
+        report_failure(__func__, "Deserialization should preserve binding map", &error);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    int roundtrip_alias = protochunk_find_global(&roundtrip, "alias");
+    if (roundtrip_alias < 0) {
+        report_failure(__func__, "Roundtrip chunk should intern alias global", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoBindingMapEntry *roundtrip_entry = NULL;
+    for (size_t i = 0; i < roundtrip.binding_entry_count; ++i) {
+        if (roundtrip.binding_entries[i].symbol_index == (uint32_t)roundtrip_alias) {
+            roundtrip_entry = &roundtrip.binding_entries[i];
+            break;
+        }
+    }
+
+    if (!roundtrip_entry) {
+        report_failure(__func__, "Roundtrip binding map should include alias symbol", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (roundtrip_entry->bindings.count != 1 ||
+        roundtrip_entry->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        roundtrip_entry->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Roundtrip binding entry should remain concrete", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if ((roundtrip.module_flags & PROTOHACK_MODULE_FLAG_HAS_BINDING_MAP) == 0) {
+        report_failure(__func__, "Roundtrip module flags should indicate binding map", NULL);
+    }
+
+    protochunk_buffer_free(&buffer);
+    protochunk_free(&roundtrip);
+    protochunk_free(&chunk);
+}
+
+static void test_generic_specialization_unknown_argument(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "let alias = identity<foo>;\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should fail for unknown type argument", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (error.ok || !strstr(error.message, "foo")) {
+        report_failure(__func__, "Error message should mention unknown type argument", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_generic_binding_serialization_roundtrip(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "let answer = identity<num>(42);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for serialization roundtrip", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *specialized = find_function_constant(&chunk, "identity<num>");
+    if (!specialized) {
+        report_failure(__func__, "Expected identity<num> specialization in original chunk", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->bindings.count != 1 ||
+        specialized->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        specialized->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Original binding metadata should be concrete", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoSerializedBuffer buffer = {0};
+    if (!protochunk_serialize_to_buffer(&chunk, &buffer, &error)) {
+        report_failure(__func__, "Serialization should succeed", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoChunk roundtrip;
+    protochunk_init(&roundtrip);
+    if (!protochunk_deserialize_from_memory(&roundtrip, buffer.data, buffer.size, &error)) {
+        report_failure(__func__, "Deserialization should succeed", &error);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *roundtrip_specialized = find_function_constant(&roundtrip, "identity<num>");
+    if (!roundtrip_specialized) {
+        report_failure(__func__, "Expected identity<num> specialization after roundtrip", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (roundtrip_specialized->bindings.count != 1 ||
+        roundtrip_specialized->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        roundtrip_specialized->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Roundtrip binding metadata should remain concrete", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    char *description = proto_function_debug_description(roundtrip_specialized);
+    if (!description || strstr(description, "bindings{T=num") == NULL) {
+        report_failure(__func__, "Roundtrip debug description should include concrete binding", NULL);
+        free(description);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&roundtrip);
+        protochunk_free(&chunk);
+        return;
+    }
+    free(description);
+
+    protochunk_buffer_free(&buffer);
+    protochunk_free(&roundtrip);
+    protochunk_free(&chunk);
+}
+
+static void test_generic_call_argument_type_mismatch(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "let alias = identity<num>;\n"
+        "alias(true);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should fail for mismatched call argument", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (error.ok || !strstr(error.message, "Argument 1")) {
+        report_failure(__func__, "Error message should mention first argument mismatch", &error);
+    }
+
+    protochunk_free(&chunk);
+}
+
+static void test_runtime_specialization_dispatch(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "craft forward<U>(value as U) gives U {\n"
+        "  let helper = identity<U>;\n"
+        "  yield helper(value);\n"
+        "}\n"
+        "print forward<num>(42);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for runtime dispatch test", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *forward_specialized = find_function_constant(&chunk, "forward<num>");
+    if (!forward_specialized) {
+        report_failure(__func__, "Expected to locate forward<num> specialization", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *symbolic_identity = NULL;
+    for (size_t i = 0; i < forward_specialized->chunk.constants_count; ++i) {
+        const ProtoValue *constant = &forward_specialized->chunk.constants[i];
+        if (constant->type != PROTO_VAL_FUNCTION) {
+            continue;
+        }
+        ProtoFunction *candidate = constant->as.function;
+        if (!candidate || !candidate->name) {
+            continue;
+        }
+        if (strcmp(candidate->name, "identity<U>") == 0) {
+            symbolic_identity = candidate;
+            break;
+        }
+    }
+
+    if (!symbolic_identity) {
+        report_failure(__func__, "Expected to locate symbolic identity<U> specialization", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoVM vm;
+    protovm_init(&vm);
+    if (!protovm_run(&vm, &chunk, &error)) {
+        report_failure(__func__, "VM execution should succeed for runtime specialization", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoTypeBindingSet binding;
+    binding.count = 1;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        binding.entries[i].tag = PROTO_TYPE_ANY;
+        binding.entries[i].param = -1;
+    }
+    binding.entries[0].tag = PROTO_TYPE_NUM;
+    binding.entries[0].param = -1;
+
+    if (vm.specializations.count == 0) {
+        report_failure(__func__, "VM should record at least one specialization entry", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *specialized = protovm_find_specialization(&vm, symbolic_identity, &binding);
+    if (!specialized) {
+        report_failure(__func__, "Runtime lookup should produce identity<num> specialization", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->bindings.count != 1 ||
+        specialized->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        specialized->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Specialization bindings should resolve to num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->arity < 1 || specialized->param_types[0] != PROTO_TYPE_NUM) {
+        report_failure(__func__, "Parameter types should be substituted at runtime", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->return_type != PROTO_TYPE_NUM) {
+        report_failure(__func__, "Return type should be specialized to num", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoValue *result = protovm_last_print(&vm);
+    if (!result || result->type != PROTO_VAL_NUMBER || fabs(result->as.number - 42.0) > 1e-6) {
+        report_failure(__func__, "Runtime dispatch should yield the original numeric value", NULL);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    protovm_reset(&vm);
+    protochunk_free(&chunk);
+}
+
+static void test_runtime_specialization_serialization_roundtrip(void) {
+    const char *source =
+        "craft identity<T>(value as T) gives T {\n"
+        "  yield value;\n"
+        "}\n"
+        "craft forward<U>(value as U) gives U {\n"
+        "  let helper = identity<U>;\n"
+        "  yield helper(value);\n"
+        "}\n"
+        "print forward<num>(42);\n";
+
+    ProtoChunk chunk;
+    protochunk_init(&chunk);
+    ProtoError error;
+    protoerror_reset(&error);
+
+    if (!protohack_compile_source(source, NULL, &chunk, &error)) {
+        report_failure(__func__, "Compilation should succeed for serialization dispatch test", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoSerializedBuffer buffer = {0};
+    if (!protochunk_serialize_to_buffer(&chunk, &buffer, &error)) {
+        report_failure(__func__, "Serialization should succeed", &error);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoChunk reloaded;
+    protochunk_init(&reloaded);
+    if (!protochunk_deserialize_from_memory(&reloaded, buffer.data, buffer.size, &error)) {
+        report_failure(__func__, "Deserialization should succeed", &error);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *forward_specialized = find_function_constant(&reloaded, "forward<num>");
+    if (!forward_specialized) {
+        report_failure(__func__, "Expected to locate forward<num> specialization after reload", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoFunction *symbolic_identity = NULL;
+    for (size_t i = 0; i < forward_specialized->chunk.constants_count; ++i) {
+        const ProtoValue *constant = &forward_specialized->chunk.constants[i];
+        if (constant->type != PROTO_VAL_FUNCTION) {
+            continue;
+        }
+        ProtoFunction *candidate = constant->as.function;
+        if (!candidate || !candidate->name) {
+            continue;
+        }
+        if (strcmp(candidate->name, "identity<U>") == 0) {
+            symbolic_identity = candidate;
+            break;
+        }
+    }
+
+    if (!symbolic_identity) {
+        report_failure(__func__, "Expected to locate symbolic identity<U> specialization after reload", NULL);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoVM vm;
+    protovm_init(&vm);
+    if (!protovm_run(&vm, &reloaded, &error)) {
+        report_failure(__func__, "VM execution should succeed for reloaded module", &error);
+        protovm_reset(&vm);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (vm.specializations.count == 0) {
+        report_failure(__func__, "VM should record specializations after runtime dispatch", NULL);
+        protovm_reset(&vm);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    ProtoTypeBindingSet binding;
+    binding.count = 1;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        binding.entries[i].tag = PROTO_TYPE_ANY;
+        binding.entries[i].param = -1;
+    }
+    binding.entries[0].tag = PROTO_TYPE_NUM;
+    binding.entries[0].param = -1;
+
+    ProtoFunction *specialized = protovm_find_specialization(&vm, symbolic_identity, &binding);
+    if (!specialized) {
+        report_failure(__func__, "Runtime lookup should find identity<num> after reload", NULL);
+        protovm_reset(&vm);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    if (specialized->bindings.count != 1 ||
+        specialized->bindings.entries[0].tag != PROTO_TYPE_NUM ||
+        specialized->bindings.entries[0].param != -1) {
+        report_failure(__func__, "Specialization bindings should remain concrete after reload", NULL);
+        protovm_reset(&vm);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    const ProtoValue *result = protovm_last_print(&vm);
+    if (!result || result->type != PROTO_VAL_NUMBER || fabs(result->as.number - 42.0) > 1e-6) {
+        report_failure(__func__, "Reloaded specialization dispatch should return original value", NULL);
+        protovm_reset(&vm);
+        protochunk_buffer_free(&buffer);
+        protochunk_free(&reloaded);
+        protochunk_free(&chunk);
+        return;
+    }
+
+    protovm_reset(&vm);
+    protochunk_buffer_free(&buffer);
+    protochunk_free(&reloaded);
+    protochunk_free(&chunk);
+}
+
+static void test_vm_specialization_table(void) {
+    ProtoVM vm;
+    protovm_init(&vm);
+
+    ProtoFunction *template_fn = proto_function_new(PROTO_FUNC_CRAFT, "template");
+    const char *params[1] = {"T"};
+    if (!proto_function_set_type_params(template_fn, params, 1)) {
+        report_failure(__func__, "Failed to set template type parameters", NULL);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    ProtoTypeBindingSet bindings = {0};
+    bindings.count = 1;
+    bindings.entries[0].tag = PROTO_TYPE_NUM;
+    bindings.entries[0].param = -1;
+
+    if (protovm_find_specialization(&vm, template_fn, &bindings) != NULL) {
+        report_failure(__func__, "Specialization table should be empty initially", NULL);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    ProtoFunction *specialized_fn = proto_function_copy(template_fn);
+    if (!specialized_fn) {
+        report_failure(__func__, "Failed to clone specialization", NULL);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    if (!protovm_register_specialization(&vm, template_fn, &bindings, specialized_fn, false)) {
+        report_failure(__func__, "Failed to register specialization", NULL);
+        proto_function_free(specialized_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    ProtoFunction *found = protovm_find_specialization(&vm, template_fn, &bindings);
+    if (found != specialized_fn) {
+        report_failure(__func__, "Lookup should return registered specialization", NULL);
+        protovm_clear_specializations(&vm, false);
+        proto_function_free(specialized_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    ProtoFunction *updated_fn = proto_function_copy(template_fn);
+    if (!updated_fn) {
+        report_failure(__func__, "Failed to clone updated specialization", NULL);
+        protovm_clear_specializations(&vm, false);
+        proto_function_free(specialized_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    if (!protovm_register_specialization(&vm, template_fn, &bindings, updated_fn, false)) {
+        report_failure(__func__, "Failed to update existing specialization", NULL);
+        proto_function_free(updated_fn);
+        protovm_clear_specializations(&vm, false);
+        proto_function_free(specialized_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    proto_function_free(specialized_fn);
+
+    found = protovm_find_specialization(&vm, template_fn, &bindings);
+    if (found != updated_fn) {
+        report_failure(__func__, "Lookup should return updated specialization", NULL);
+        protovm_clear_specializations(&vm, false);
+        proto_function_free(updated_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    ProtoTypeBindingSet other_bindings = {0};
+    other_bindings.count = 1;
+    other_bindings.entries[0].tag = PROTO_TYPE_TEXT;
+    other_bindings.entries[0].param = -1;
+
+    if (protovm_find_specialization(&vm, template_fn, &other_bindings) != NULL) {
+        report_failure(__func__, "Lookup with different bindings should miss", NULL);
+        protovm_clear_specializations(&vm, false);
+        proto_function_free(updated_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    protovm_clear_specializations(&vm, false);
+    if (protovm_find_specialization(&vm, template_fn, &bindings) != NULL) {
+        report_failure(__func__, "Specialization table should be empty after clear", NULL);
+        proto_function_free(updated_fn);
+        proto_function_free(template_fn);
+        return;
+    }
+
+    proto_function_free(updated_fn);
+    proto_function_free(template_fn);
+}
+
 #if PROTOHACK_ENABLE_JIT
 static void test_jit_typed_memory_block(void) {
     const char *source =
@@ -743,24 +1875,42 @@ static void run_test(void (*test_fn)(void)) {
 }
 
 int main(void) {
-    run_test(test_compile_and_run_control_flow);
-    run_test(test_use_undefined_global);
-    run_test(test_const_reassignment_fails);
-    run_test(test_pack_and_extract_executable);
-    run_test(test_user_function_and_memory);
-    run_test(test_class_methods);
-    run_test(test_this_outside_class_fails);
-    run_test(test_include_directive);
-    run_test(test_suggest_misspelled_native);
-    run_test(test_jit_block_extract);
-    run_test(test_encrypt_file_roundtrip);
-    run_test(test_complex_natives);
-    run_test(test_complex_division_by_zero_errors);
-    run_test(test_hex_encode_decode);
-    run_test(test_rand_bytes);
+    RUN_TEST(test_protoerror_json_serialization);
+    RUN_TEST(test_compile_and_run_control_flow);
+    RUN_TEST(test_use_undefined_global);
+    RUN_TEST(test_const_reassignment_fails);
+    RUN_TEST(test_pack_and_extract_executable);
+    RUN_TEST(test_module_header_metadata);
+    RUN_TEST(test_extend_parser_metadata);
+    RUN_TEST(test_extend_requires_type_arguments);
+    RUN_TEST(test_extend_rejects_type_arguments_for_non_generic_craft);
+    RUN_TEST(test_extend_craft_specialization_execution);
+    RUN_TEST(test_extend_craft_parameter_type_mismatch);
+    RUN_TEST(test_user_function_and_memory);
+    RUN_TEST(test_class_methods);
+    RUN_TEST(test_this_outside_class_fails);
+    RUN_TEST(test_include_directive);
+    RUN_TEST(test_suggest_misspelled_native);
+    RUN_TEST(test_jit_block_extract);
+    RUN_TEST(test_encrypt_file_roundtrip);
+    RUN_TEST(test_complex_natives);
+    RUN_TEST(test_complex_division_by_zero_errors);
+    RUN_TEST(test_hex_encode_decode);
+    RUN_TEST(test_rand_bytes);
+    RUN_TEST(test_generic_specialization_concrete_binding);
+    RUN_TEST(test_generic_specialization_symbolic_binding);
+    RUN_TEST(test_generic_binding_map_exports);
+    RUN_TEST(test_generic_specialization_unknown_argument);
+    RUN_TEST(test_generic_binding_serialization_roundtrip);
+    RUN_TEST(test_generic_call_argument_type_mismatch);
+    RUN_TEST(test_runtime_specialization_dispatch);
+    RUN_TEST(test_runtime_specialization_serialization_roundtrip);
+    RUN_TEST(test_vm_specialization_table);
+    RUN_TEST(test_native_binding_contract_success);
+    RUN_TEST(test_native_binding_contract_failure);
 #if PROTOHACK_ENABLE_JIT
-    run_test(test_jit_typed_memory_block);
-    run_test(test_jit_bailout_counters);
+    RUN_TEST(test_jit_typed_memory_block);
+    RUN_TEST(test_jit_bailout_counters);
 #endif
 
     if (tests_failed > 0) {
