@@ -73,6 +73,13 @@ ProtoValue proto_value_memory(ProtoTypedMemory memory) {
     return value;
 }
 
+ProtoValue proto_value_pointer(ProtoPointer pointer) {
+    ProtoValue value;
+    value.type = PROTO_VAL_POINTER;
+    value.as.pointer = pointer;
+    return value;
+}
+
 ProtoValue proto_value_copy(const ProtoValue *value) {
     if (!value) {
         return proto_value_null();
@@ -98,6 +105,8 @@ ProtoValue proto_value_copy(const ProtoValue *value) {
             return proto_value_bound_method(value->as.bound_method);
         case PROTO_VAL_MEMORY:
             return proto_value_memory(proto_memory_clone(&value->as.memory));
+        case PROTO_VAL_POINTER:
+            return proto_value_pointer(value->as.pointer);
         default:
             return proto_value_null();
     }
@@ -114,6 +123,9 @@ void proto_value_free(ProtoValue *value) {
             break;
         case PROTO_VAL_MEMORY:
             proto_memory_free(&value->as.memory);
+            break;
+        case PROTO_VAL_POINTER:
+            /* pointers do not own their targets */
             break;
         case PROTO_VAL_CLASS:
             proto_class_release(value->as.klass);
@@ -186,6 +198,21 @@ bool proto_value_equal(const ProtoValue *a, const ProtoValue *b) {
                     break;
             }
             return memcmp(a->as.memory.data, b->as.memory.data, a->as.memory.count * element_size) == 0;
+        case PROTO_VAL_POINTER: {
+            const ProtoPointer *pa = &a->as.pointer;
+            const ProtoPointer *pb = &b->as.pointer;
+            if (pa->kind != pb->kind || pa->is_const != pb->is_const) {
+                return false;
+            }
+            switch (pa->kind) {
+                case PROTO_POINTER_STACK:
+                    return pa->as.stack.slot == pb->as.stack.slot && pa->as.stack.generation == pb->as.stack.generation;
+                case PROTO_POINTER_GLOBAL:
+                    return pa->as.global.slot == pb->as.global.slot && pa->as.global.index == pb->as.global.index;
+                default:
+                    return false;
+            }
+        }
         default:
             return false;
     }
@@ -206,8 +233,13 @@ void proto_value_print(const ProtoValue *value) {
             printf("%s", value->as.string ? value->as.string : "");
             break;
         case PROTO_VAL_FUNCTION: {
-            const char *name = value->as.function && value->as.function->name ? value->as.function->name : "<anonymous>";
-            printf("<craft %s/%u>", name, value->as.function ? value->as.function->arity : 0u);
+                char *description = proto_function_debug_description(value->as.function);
+                if (description) {
+                    printf("%s", description);
+                    free(description);
+                } else {
+                    printf("<craft>");
+                }
             break;
         }
         case PROTO_VAL_CLASS: {
@@ -231,6 +263,13 @@ void proto_value_print(const ProtoValue *value) {
         case PROTO_VAL_MEMORY: {
             const char *type_name = proto_type_tag_name(value->as.memory.element_type);
             printf("<memory %s[%zu]>", type_name, value->as.memory.count);
+            break;
+        }
+        case PROTO_VAL_POINTER: {
+            const ProtoPointer *pointer = &value->as.pointer;
+            const char *kind = pointer->kind == PROTO_POINTER_GLOBAL ? "global" : "stack";
+            void *address = pointer->kind == PROTO_POINTER_GLOBAL ? (void *)pointer->as.global.slot : (void *)pointer->as.stack.slot;
+            printf("<ptr %s%s %p>", kind, pointer->is_const ? " const" : "", address);
             break;
         }
         default:
@@ -262,13 +301,11 @@ char *proto_value_to_cstring(const ProtoValue *value) {
             }
             return protohack_copy_string(value->as.string, strlen(value->as.string));
         case PROTO_VAL_FUNCTION: {
-            char buffer[64];
-            const char *name = value->as.function && value->as.function->name ? value->as.function->name : "<anonymous>";
-            int written = snprintf(buffer, sizeof buffer, "<craft %s/%u>", name, value->as.function ? value->as.function->arity : 0u);
-            if (written < 0) {
-                return protohack_copy_string("<craft>", 7);
-            }
-            return protohack_copy_string(buffer, (size_t)written);
+                char *description = proto_function_debug_description(value->as.function);
+                if (!description) {
+                    return protohack_copy_string("<craft>", 7);
+                }
+                return description;
         }
         case PROTO_VAL_CLASS: {
             char buffer[64];
@@ -306,6 +343,17 @@ char *proto_value_to_cstring(const ProtoValue *value) {
             int written = snprintf(buffer, sizeof buffer, "<memory %s[%zu]>", type_name, value->as.memory.count);
             if (written < 0) {
                 return protohack_copy_string("<memory>", 8);
+            }
+            return protohack_copy_string(buffer, (size_t)written);
+        }
+        case PROTO_VAL_POINTER: {
+            char buffer[64];
+            const ProtoPointer *pointer = &value->as.pointer;
+            const char *kind = pointer->kind == PROTO_POINTER_GLOBAL ? "global" : "stack";
+            void *address = pointer->kind == PROTO_POINTER_GLOBAL ? (void *)pointer->as.global.slot : (void *)pointer->as.stack.slot;
+            int written = snprintf(buffer, sizeof buffer, "<ptr %s%s %p>", kind, pointer->is_const ? " const" : "", address);
+            if (written < 0) {
+                return protohack_copy_string("<ptr>", 5);
             }
             return protohack_copy_string(buffer, (size_t)written);
         }
