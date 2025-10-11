@@ -5,6 +5,7 @@
 
 #include "protohack/internal/common.h"
 #include "protohack/function.h"
+#include "protohack/serialize.h"
 #if PROTOHACK_ENABLE_JIT
 #include "protohack/jit_ir.h"
 #endif
@@ -44,6 +45,17 @@ void protochunk_init(ProtoChunk *chunk) {
     chunk->lines = NULL;
     chunk->lines_count = 0;
     chunk->lines_capacity = 0;
+
+    chunk->binding_entries = NULL;
+    chunk->binding_entry_count = 0;
+    chunk->binding_entry_capacity = 0;
+
+    chunk->module_version = PROTOHACK_MODULE_VERSION;
+    chunk->module_flags = 0;
+
+    chunk->extensions = NULL;
+    chunk->extension_count = 0;
+    chunk->extension_capacity = 0;
 
 #if PROTOHACK_ENABLE_JIT
     chunk->jit_cache = NULL;
@@ -89,6 +101,25 @@ void protochunk_free(ProtoChunk *chunk) {
     chunk->lines = NULL;
     chunk->lines_count = 0;
     chunk->lines_capacity = 0;
+
+    free(chunk->binding_entries);
+    chunk->binding_entries = NULL;
+    chunk->binding_entry_count = 0;
+    chunk->binding_entry_capacity = 0;
+
+    chunk->module_version = PROTOHACK_MODULE_VERSION;
+    chunk->module_flags = 0;
+
+    if (chunk->extensions) {
+        for (size_t i = 0; i < chunk->extension_count; ++i) {
+            free(chunk->extensions[i].body_source);
+            chunk->extensions[i].body_source = NULL;
+        }
+    }
+    free(chunk->extensions);
+    chunk->extensions = NULL;
+    chunk->extension_count = 0;
+    chunk->extension_capacity = 0;
 
 #if PROTOHACK_ENABLE_JIT
     protochunk_free_jit_cache(chunk);
