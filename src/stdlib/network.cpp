@@ -262,15 +262,34 @@ bool proto_stdlib_net_ping(const char *host, uint32_t timeout_ms, ProtoError *er
         timeout_ms = 1000u;
     }
 
+    bool attempted = false;
+    bool recorded_error = false;
+    bool timed_out = false;
+    int last_error_code = 0;
+
     for (struct addrinfo *entry = resolved; entry != nullptr; entry = entry->ai_next) {
+        attempted = true;
+
         SocketHandle raw_socket = socket(entry->ai_family, entry->ai_socktype, entry->ai_protocol);
         if (raw_socket == kInvalidSocket) {
+#ifdef _WIN32
+            last_error_code = WSAGetLastError();
+#else
+            last_error_code = errno;
+#endif
+            recorded_error = true;
             continue;
         }
 
         SocketGuard socket_guard(raw_socket);
 
         if (!set_non_blocking(raw_socket, true)) {
+#ifdef _WIN32
+            last_error_code = WSAGetLastError();
+#else
+            last_error_code = errno;
+#endif
+            recorded_error = true;
             continue;
         }
 
@@ -289,6 +308,8 @@ bool proto_stdlib_net_ping(const char *host, uint32_t timeout_ms, ProtoError *er
             if (error_is_connection_refused(last_error)) {
                 return true;
             }
+            recorded_error = true;
+            last_error_code = last_error;
             continue;
         }
 
@@ -298,6 +319,34 @@ bool proto_stdlib_net_ping(const char *host, uint32_t timeout_ms, ProtoError *er
         }
         if (error_is_connection_refused(wait_error)) {
             return true;
+        }
+
+        recorded_error = true;
+        last_error_code = wait_error;
+#ifdef _WIN32
+        if (wait_error == WSAETIMEDOUT) {
+            timed_out = true;
+        }
+#else
+        if (wait_error == ETIMEDOUT) {
+            timed_out = true;
+        }
+#endif
+    }
+
+    if (error && error->ok) {
+        if (!attempted) {
+            protoerror_set(error, 0, "net_ping could not create a socket for '%s'", host);
+        } else if (timed_out) {
+            protoerror_set(error, 0, "net_ping timed out connecting to '%s'", host);
+        } else if (recorded_error && last_error_code != 0) {
+#ifdef _WIN32
+            protoerror_set(error, 0, "net_ping failed for '%s' (WSA error %d)", host, last_error_code);
+#else
+            protoerror_set(error, 0, "net_ping failed for '%s' (errno %d)", host, last_error_code);
+#endif
+        } else {
+            protoerror_set(error, 0, "net_ping could not reach '%s'", host);
         }
     }
 
