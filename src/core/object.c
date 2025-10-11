@@ -12,6 +12,8 @@ struct ProtoClass {
     size_t method_count;
     size_t method_capacity;
     size_t ref_count;
+    uint8_t type_param_count;
+    char *type_params[PROTOHACK_MAX_TYPE_PARAMS];
 };
 
 typedef struct ProtoFieldEntry {
@@ -43,6 +45,10 @@ ProtoClass *proto_class_new(const char *name) {
     klass->method_count = 0;
     klass->method_capacity = 0;
     klass->ref_count = 1;
+    klass->type_param_count = 0;
+    for (size_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        klass->type_params[i] = NULL;
+    }
     return klass;
 }
 
@@ -79,6 +85,11 @@ void proto_class_release(ProtoClass *klass) {
     klass->methods = NULL;
     klass->method_count = 0;
     klass->method_capacity = 0;
+    for (size_t i = 0; i < klass->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        free(klass->type_params[i]);
+        klass->type_params[i] = NULL;
+    }
+    klass->type_param_count = 0;
     free(klass->name);
     klass->name = NULL;
     free(klass);
@@ -120,6 +131,33 @@ bool proto_class_add_method(ProtoClass *klass, const char *name, ProtoFunction *
     ProtoMethodEntry *entry = &klass->methods[klass->method_count++];
     entry->name = protohack_copy_string(name, strlen(name));
     entry->function = function;
+    return true;
+}
+
+bool proto_class_set_type_params(ProtoClass *klass, const char *const *params, uint8_t count) {
+    if (!klass) {
+        return false;
+    }
+    for (size_t i = 0; i < klass->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        free(klass->type_params[i]);
+        klass->type_params[i] = NULL;
+    }
+    klass->type_param_count = 0;
+    if (!params || count == 0) {
+        return true;
+    }
+    if (count > PROTOHACK_MAX_TYPE_PARAMS) {
+        return false;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+        const char *name = params[i] ? params[i] : "";
+        char *copy = protohack_copy_string(name, strlen(name));
+        if (!copy) {
+            return false;
+        }
+        klass->type_params[i] = copy;
+    }
+    klass->type_param_count = count;
     return true;
 }
 
