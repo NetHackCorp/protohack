@@ -1,97 +1,161 @@
-const banner = "Protohack Signal Recon";
-println("==============================");
-println(banner + " // complex demo");
-println("==============================");
+// Protohack orchestration example – full file encryption pipeline with metrics
 
-let sample_count = 12;
-let noise_threshold = 30;
-let seed = rand(100);
+const JOB_COUNT = 3;
 
-let traces = carve numeric(sample_count);
-let anomaly_flags = carve flag(sample_count);
+craft job_label(index as num) gives text {
+    if (index == 0) {
+        yield "alpha";
+    }
+    if (index == 1) {
+        yield "beta";
+    }
+    if (index == 2) {
+        yield "gamma";
+    }
+    yield "job-" + to_string(index);
+}
 
-let frame = 0;
-while (frame < sample_count) {
-    let base = seed + (frame * 3.4);
-    let jitter = rand(100) / 10;
-    let reading = base + jitter - sqrt(frame + 1);
-    let is_spike = reading > noise_threshold + frame;
+craft job_input(index as num) gives text {
+    if (index == 0) {
+        yield "samples/alpha.txt";
+    }
+    if (index == 1) {
+        yield "samples/beta.txt";
+    }
+    if (index == 2) {
+        yield "samples/gamma.txt";
+    }
+    yield "samples/job-" + to_string(index) + ".txt";
+}
 
-    etch numeric(traces, frame, reading);
-    etch flag(anomaly_flags, frame, is_spike);
+craft job_cipher(index as num) gives text {
+    yield job_input(index) + ".enc";
+}
 
-    if (is_spike) {
-        println("[" + to_string(frame) + "] spike -> " + to_string(reading));
+craft job_recovered(index as num) gives text {
+    yield job_input(index) + ".dec";
+}
+
+craft job_manual_key(index as num) gives text {
+    if (index == 1) {
+        yield "cafebabecafebabecafebabecafebabe";
+    }
+    yield "";
+}
+
+craft request_operator_key(label as text, fallback as text) gives text {
+    let prompt = "[" + label + "] Enter encryption key";
+    if (len(fallback) > 0) {
+        prompt = prompt + " (hex, leave blank to use preset)";
     } else {
-        println("[" + to_string(frame) + "] ok -> " + to_string(reading));
+        prompt = prompt + " (hex, leave blank for random)";
     }
+    prompt = prompt + ": ";
 
-    frame = frame + 1;
+    let input = read_line(prompt);
+    if (input == null) {
+        yield fallback;
+    }
+    if (len(input) > 0) {
+        yield input;
+    }
+    yield fallback;
 }
 
-println("");
+craft compute_summary(lengths as numeric, count as num) gives text {
+    if (count <= 0) {
+        yield "no encryption runs recorded";
+    }
 
-craft sum(readings, count as num) gives num {
-    let i = 0;
+    let idx = 0;
     let total = 0;
-    while (i < count) {
-        let value = probe numeric(readings, i);
-        total = total + value;
-        i = i + 1;
-    }
-    yield total;
-}
+    let minimum = probe numeric(lengths, 0);
+    let maximum = minimum;
 
-craft anomaly_count(flags, count as num) gives num {
-    let i = 0;
-    let total = 0;
-    while (i < count) {
-        if (probe flag(flags, i)) {
-            total = total + 1;
+    while (idx < count) {
+        let length = probe numeric(lengths, idx);
+        total = total + length;
+        if (length < minimum) {
+            minimum = length;
         }
-        i = i + 1;
-    }
-    yield total;
-}
-
-craft max_reading(readings, count as num) gives num {
-    let i = 1;
-    let highest = probe numeric(readings, 0);
-    while (i < count) {
-        let value = probe numeric(readings, i);
-        if (value > highest) {
-            highest = value;
+        if (length > maximum) {
+            maximum = length;
         }
-        i = i + 1;
+        idx = idx + 1;
     }
-    yield highest;
+
+    let average = total / count;
+    let report = "min=" + to_string(minimum) + ", max=" + to_string(maximum) + ", avg=" + to_string(average);
+    yield report;
 }
 
-craft format_report(avg as num, peak as num, flagged as num, total as num) gives text {
-    let header = "summary:";
-    let avg_part = " avg=" + to_string(avg);
-    let peak_part = " peak=" + to_string(peak);
-    let flag_part = " flagged=" + to_string(flagged) + "/" + to_string(total);
-    yield header + avg_part + peak_part + flag_part;
+class CipherMonitor {
+    init(batch as num) {
+        this.count = batch;
+        this.key_lengths = carve numeric(batch);
+        this.total_runs = 0;
+    }
+
+    record(run as num, key as text) {
+        let length = len(key);
+        let buffer = this.key_lengths;
+        etch numeric(buffer, run, length);
+        this.total_runs = this.total_runs + 1;
+    }
+
+    summary() gives text {
+        yield compute_summary(this.key_lengths, this.count);
+    }
 }
 
-let total_energy = sum(traces, sample_count);
-let avg_energy = total_energy / sample_count;
-let total_spikes = anomaly_count(anomaly_flags, sample_count);
-let peak_energy = max_reading(traces, sample_count);
-let report = format_report(avg_energy, peak_energy, total_spikes, sample_count);
+craft announce_job(label as text, plain as text, cipher as text, recovered as text) gives text {
+    yield "[" + label + "] " + plain + " -> " + cipher + " (restore: " + recovered + ")";
+}
 
-println("");
-println(report);
+println("==============================");
+println("Protohack secure vault orchestrator");
+println("==============================\n");
 
-println("");
-println("Anomaly timeline:");
-for (let slot = 0; slot < sample_count; slot = slot + 1) {
-    let status = probe flag(anomaly_flags, slot);
-    let value = probe numeric(traces, slot);
-    if (status) {
-        println(" -> frame " + to_string(slot) + " flagged at " + to_string(value));
+println("This script assumes the source files exist inside the samples/ directory.\n" +
+    "Each job encrypts a different payload, stores the key, and then restores the plaintext.");
+
+let monitor = CipherMonitor(JOB_COUNT);
+
+let job = 0;
+while (job < JOB_COUNT) {
+    let label = job_label(job);
+    let plain_path = job_input(job);
+    let cipher_path = job_cipher(job);
+    let recovered_path = job_recovered(job);
+    let manual_key = job_manual_key(job);
+
+    println("----");
+    println(announce_job(label, plain_path, cipher_path, recovered_path));
+
+    let operator_key = request_operator_key(label, manual_key);
+
+    let key = null;
+    if (len(operator_key) > 0) {
+        println("Encrypting with operator-provided key.");
+        key = encrypt_file(plain_path, cipher_path, operator_key);
     } else {
-        println(" -> frame " + to_string(slot) + " nominal (" + to_string(value) + ")");
+        println("Generating random key for job " + label + ".");
+        key = encrypt_file(plain_path, cipher_path);
     }
+
+    println("Key material (" + to_string(len(key)) + " hex chars): " + key);
+    monitor.record(job, key);
+
+    println("Decrypting immediately to verify integrity...");
+    decrypt_file(cipher_path, recovered_path, key);
+    println("Restored file written to " + recovered_path + ".\n");
+
+    job = job + 1;
 }
+
+println("==============================");
+println("Vault summary");
+println("==============================");
+println("Total jobs executed: " + to_string(monitor.total_runs));
+println("Key length stats: " + monitor.summary());
+println("==============================");

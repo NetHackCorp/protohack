@@ -1,0 +1,19 @@
+// Demonstration of defining a generic craft and extending it with a specialized implementation.
+
+craft identity<T>(value as T) gives T {
+  print "default identity was invoked";
+  yield value;
+}
+
+extend craft identity<num> (value as num) gives num {
+  print "numeric identity extension was invoked";
+  yield value + 10;
+}
+
+print "== identity demo ==";
+let original_number = 5;
+let adjusted_number = identity<num>(original_number);
+print adjusted_number;
+
+let echoed_text = identity<text>("protohack");
+print echoed_text;

@@ -1,0 +1,7 @@
+craft double(value as num) gives num {
+  yield value + value;
+}
+let buffer = carve numeric(2);
+etch numeric(buffer, 0, 7);
+let output = double(probe numeric(buffer, 0));
+println("value=" + to_string(output));

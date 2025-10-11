@@ -1,0 +1,2 @@
+let interfaces = net_interfaces();
+println(interfaces);

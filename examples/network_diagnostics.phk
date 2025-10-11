@@ -1,0 +1,107 @@
+// Protohack networking showcase – exercises the standard network library
+
+const TARGET_COUNT = 3;
+
+craft target_host(index as num) gives text {
+    if (index == 0) {
+        yield "example.com";
+    }
+    if (index == 1) {
+        yield "neverssl.com";
+    }
+    if (index == 2) {
+        yield "httpbin.org";
+    }
+    yield "example.com";
+}
+
+craft target_timeout(index as num) gives num {
+    if (index == 0) {
+        yield 1200;
+    }
+    if (index == 1) {
+        yield 1400;
+    }
+    if (index == 2) {
+        yield 1800;
+    }
+    yield 1500;
+}
+
+craft emphasize(label as text) {
+    println("\n==== " + label + " ====");
+}
+
+let session_start = clock();
+
+println("===========================================");
+println("Protohack network diagnostics walkthrough");
+println("===========================================\n");
+
+let hostname = net_hostname();
+println("Local hostname: " + hostname);
+
+emphasize("Interface Enumeration");
+let interface_dump = net_interfaces();
+println("name|address pairs reported by net_interfaces():");
+println(interface_dump);
+
+emphasize("Target Survey");
+let success_count = 0;
+let total_latency = 0;
+let min_latency = 0;
+let max_latency = 0;
+let first_success = true;
+let index = 0;
+
+while (index < TARGET_COUNT) {
+    let host = target_host(index);
+    let timeout = target_timeout(index);
+
+    println("\n-- Host " + host + " --");
+    let resolved = net_resolve(host);
+    println("Resolved address: " + resolved);
+
+    let t0 = clock();
+    let ok = net_ping(host, timeout);
+    let t1 = clock();
+
+    let elapsed = (t1 - t0) * 1000;
+    if (!ok) {
+        println("TCP connectivity failed after " + to_string(elapsed) + " ms (timeout " + to_string(timeout) + " ms)");
+    } else {
+        if (first_success) {
+            min_latency = elapsed;
+            max_latency = elapsed;
+            first_success = false;
+        } else {
+            if (elapsed < min_latency) {
+                min_latency = elapsed;
+            }
+            if (elapsed > max_latency) {
+                max_latency = elapsed;
+            }
+        }
+        total_latency = total_latency + elapsed;
+        success_count = success_count + 1;
+        println("TCP connectivity confirmed in " + to_string(elapsed) + " ms (timeout " + to_string(timeout) + " ms)");
+    }
+
+    index = index + 1;
+}
+
+emphasize("Summary");
+println("Targets inspected: " + to_string(TARGET_COUNT));
+println("Successful pings: " + to_string(success_count));
+if (success_count == 0) {
+    println("Latency distribution: no pings succeeded");
+} else {
+    let average_latency = total_latency / success_count;
+    let summary = "min=" + to_string(min_latency) + " ms, max=" + to_string(max_latency) + " ms, avg=" + to_string(average_latency) + " ms";
+    println("Latency distribution: " + summary);
+}
+
+let total_runtime = (clock() - session_start) * 1000;
+println("Elapsed runtime: " + to_string(total_runtime) + " ms");
+
+println("\nDiagnostics complete. Adjust the host list or timeouts as needed for your environment.");

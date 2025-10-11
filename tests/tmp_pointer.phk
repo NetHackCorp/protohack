@@ -1,0 +1,4 @@
+let value = 10;
+let ptr = &value;
+*ptr = 21;
+print value;

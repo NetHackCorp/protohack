@@ -1,5 +1,4 @@
 // Protohack in-place file encryption utility
-
 craft mod_two(length as num) gives num {
     let remainder = length;
     while (remainder >= 2) {

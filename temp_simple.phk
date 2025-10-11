@@ -1,0 +1,5 @@
+craft double(value as num) gives num {
+  yield value + value;
+}
+let output = double(7);
+print output;

@@ -1,0 +1,45 @@
+const complex_banner = "Protohack Signal Recon";
+
+craft sum(readings, count as num) gives num {
+    let i = 0;
+    let total = 0;
+    while (i < count) {
+        let value = probe numeric(readings, i);
+        total = total + value;
+        i = i + 1;
+    }
+    yield total;
+}
+
+craft anomaly_count(flags, count as num) gives num {
+    let i = 0;
+    let total = 0;
+    while (i < count) {
+        if (probe flag(flags, i)) {
+            total = total + 1;
+        }
+        i = i + 1;
+    }
+    yield total;
+}
+
+craft max_reading(readings, count as num) gives num {
+    let i = 1;
+    let highest = probe numeric(readings, 0);
+    while (i < count) {
+        let value = probe numeric(readings, i);
+        if (value > highest) {
+            highest = value;
+        }
+        i = i + 1;
+    }
+    yield highest;
+}
+
+craft format_report(avg as num, peak as num, flagged as num, total as num) gives text {
+    let header = "summary:";
+    let avg_part = " avg=" + to_string(avg);
+    let peak_part = " peak=" + to_string(peak);
+    let flag_part = " flagged=" + to_string(flagged) + "/" + to_string(total);
+    yield header + avg_part + peak_part + flag_part;
+}

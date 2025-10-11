@@ -1,0 +1,39 @@
+const banner = "Pointer showcase";
+
+let accumulator = 0;
+
+craft add_into(target_ptr as pointer, amount as num) gives num {
+  println("add_into before ->", *target_ptr);
+  let updated = *target_ptr + amount;
+  *target_ptr = updated;
+  yield updated;
+}
+
+craft make_counter(start as num) gives pointer {
+  let local_value = start;
+  println("local_value ->", local_value);
+  let local_ptr = &local_value;
+  println("local_ptr ->", local_ptr);
+
+  let running_total = add_into(local_ptr, 1);
+  running_total = add_into(local_ptr, 2);
+
+  let accumulator_ptr = &accumulator;
+  *accumulator_ptr = running_total;
+
+  yield accumulator_ptr;)
+}
+
+println(banner);
+let shared_ptr = make_counter(5);
+println("Accumulator:", accumulator);
+println("Through pointer:", *shared_ptr);
+
+let alias_ptr = shared_ptr;
+add_into(alias_ptr, 10);
+println("Updated accumulator:", accumulator);
+println("Pointer still sees:", *shared_ptr);
+
+const answer = 42;
+let answer_ptr = &answer;
+println("Const answer:", *answer_ptr);

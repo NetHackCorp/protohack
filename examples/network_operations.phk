@@ -1,0 +1,144 @@
+// Protohack advanced networking example
+// Leverages the standard networking library to collect rich diagnostics
+// across multiple public services, including per-target latency stats
+// and local interface inspection.
+
+const TARGET_COUNT = 4;
+const SAMPLES_PER_TARGET = 3;
+
+craft target_host(index as num) gives text {
+    if (index == 0) { yield "api.github.com"; }
+    if (index == 1) { yield "registry.npmjs.org"; }
+    if (index == 2) { yield "pypi.org"; }
+    yield "developer.mozilla.org";
+}
+
+craft target_doc(index as num) gives text {
+    if (index == 0) { yield "https://docs.github.com/en/rest"; }
+    if (index == 1) { yield "https://www.npmjs.com/"; }
+    if (index == 2) { yield "https://pypi.org/"; }
+    yield "https://developer.mozilla.org/";
+}
+
+craft target_timeout(index as num) gives num {
+    if (index == 0) { yield 1600; }
+    if (index == 1) { yield 1800; }
+    if (index == 2) { yield 2000; }
+    if (index == 3) { yield 2200; }
+    yield 2000;
+}
+
+class SampleBuffer {
+    init(capacity as num) {
+        this.capacity = capacity;
+        this.values = carve numeric(capacity);
+        this.count = 0;
+        this.total = 0;
+    }
+
+    push(value as num) {
+        if (this.count < this.capacity) {
+            let local = this.values;
+            etch numeric(local, this.count, value);
+            this.values = local;
+            this.total = this.total + value;
+            this.count = this.count + 1;
+        }
+    }
+
+    has_data() gives flag {
+        if (this.count > 0) { yield true; }
+        yield false;
+    }
+
+    min() gives num {
+        let local = this.values;
+        let best = probe numeric(local, 0);
+        let idx = 1;
+        while (idx < this.count) {
+            let sample = probe numeric(local, idx);
+            if (sample < best) {
+                best = sample;
+            }
+            idx = idx + 1;
+        }
+        yield best;
+    }
+
+    max() gives num {
+        let local = this.values;
+        let best = probe numeric(local, 0);
+        let idx = 1;
+        while (idx < this.count) {
+            let sample = probe numeric(local, idx);
+            if (sample > best) {
+                best = sample;
+            }
+            idx = idx + 1;
+        }
+        yield best;
+    }
+
+    avg() gives num {
+        yield this.total / this.count;
+    }
+}
+
+let session_start = clock();
+println("================================================================");
+println("Protohack network operations center – rapport avancé");
+println("================================================================\n");
+
+let machine = net_hostname();
+println("> Hôte local : " + machine);
+
+println("> Interfaces détectées :");
+println(net_interfaces());
+
+println("\n> Cibles enregistrées :");
+let host_index = 0;
+while (host_index < TARGET_COUNT) {
+    let listed_host = target_host(host_index);
+    let listed_doc = target_doc(host_index);
+    println("  - " + listed_host + " (ref : " + listed_doc + ")");
+    host_index = host_index + 1;
+}
+
+println("\n> Analyse de connectivité (" + to_string(SAMPLES_PER_TARGET) + " échantillons par cible)");
+let target_index = 0;
+while (target_index < TARGET_COUNT) {
+    let probe_host = target_host(target_index);
+    let timeout = target_timeout(target_index);
+
+    println("\n--- " + probe_host + " ---");
+    let resolved = net_resolve(probe_host);
+    println("Adresse résolue : " + resolved);
+
+    let samples = SampleBuffer(SAMPLES_PER_TARGET);
+    let sample_idx = 0;
+    while (sample_idx < SAMPLES_PER_TARGET) {
+        let sample_timeout = timeout + sample_idx * 200;
+        let start = clock();
+        let ok = net_ping(probe_host, sample_timeout);
+        let elapsed = (clock() - start) * 1000;
+        if (!ok) {
+            println("  essai " + to_string(sample_idx + 1) + ": échec (timeout " + to_string(sample_timeout) + " ms)");
+        } else {
+            println("  essai " + to_string(sample_idx + 1) + ": " + to_string(elapsed) + " ms");
+            samples.push(elapsed);
+        }
+        sample_idx = sample_idx + 1;
+    }
+
+    if (samples.has_data()) {
+        println("Résumé : min " + to_string(samples.min()) + " ms, max " + to_string(samples.max()) + " ms, moyenne " + to_string(samples.avg()) + " ms");
+    } else {
+        println("Résumé : aucune tentative réussie");
+    }
+
+    target_index = target_index + 1;
+}
+
+let total_runtime = (clock() - session_start) * 1000;
+println("\nDurée totale du diagnostic : " + to_string(total_runtime) + " ms");
+println("Fin du rapport.");
