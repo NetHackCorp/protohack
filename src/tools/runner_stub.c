@@ -56,6 +56,29 @@ static bool get_self_path(char *buffer, size_t size, const char *argv0) {
 int main(int argc, char **argv) {
     (void)argc;
 
+#if defined(_WIN32)
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    HANDLE stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (stdout_handle != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(stdout_handle, &mode)) {
+            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(stdout_handle, mode);
+        }
+    }
+
+    HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+    if (stderr_handle != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(stderr_handle, &mode)) {
+            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(stderr_handle, mode);
+        }
+    }
+#endif
+
     char exe_path[4096];
     if (!get_self_path(exe_path, sizeof exe_path, argv && argv[0] ? argv[0] : NULL)) {
         fprintf(stderr, "protohack-runner: unable to determine executable path\n");
