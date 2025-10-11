@@ -16,6 +16,7 @@
 #include "protohack/internal/common.h"
 #include "protohack/native.h"
 #include "protohack/opcode.h"
+#include "protohack/serialize.h"
 #include "protohack/types.h"
 #include "protohack/value.h"
 
@@ -42,8 +43,6 @@ typedef enum {
     TOKEN_RIGHT_BRACKET,
     TOKEN_COMMA,
     TOKEN_DOT,
-    TOKEN_PIPE,
-    TOKEN_COLON,
     TOKEN_MINUS,
     TOKEN_PLUS,
     TOKEN_SEMICOLON,
@@ -61,34 +60,114 @@ typedef enum {
     TOKEN_STRING,
     TOKEN_NUMBER,
     TOKEN_AND,
-    TOKEN_OR,
+    TOKEN_CLASS,
+    TOKEN_CONST,
     TOKEN_ELSE,
     TOKEN_FALSE,
     TOKEN_FOR,
+    TOKEN_FUN,
     TOKEN_IF,
-    TOKEN_LET,
     TOKEN_NULL,
+    TOKEN_OR,
     TOKEN_PRINT,
+    TOKEN_RETURN,
+    TOKEN_SUPER,
+    TOKEN_THIS,
     TOKEN_TRUE,
+    TOKEN_VAR,
     TOKEN_WHILE,
-    TOKEN_CONST,
-    TOKEN_CRAFT,
-    TOKEN_CLASS,
+    TOKEN_EOF,
+    TOKEN_ERROR,
+    TOKEN_LET,
+    TOKEN_EXTEND,
     TOKEN_CALL,
-    TOKEN_GIVES,
-    TOKEN_YIELD,
-    TOKEN_FLAG,
-    TOKEN_NUMERIC,
-    TOKEN_TEXT,
     TOKEN_RAW,
-    TOKEN_NONE,
+    TOKEN_WITH,
+    TOKEN_TRAIT,
+    TOKEN_IMPLEMENT,
+    TOKEN_ARROW,
+    TOKEN_CRAFT,
+    TOKEN_AMPERSAND,
+    TOKEN_MATCH,
+    TOKEN_CASE,
+    TOKEN_DEFAULT,
+    TOKEN_PIPE,
+    TOKEN_TEXT,
+    TOKEN_NUMERIC,
     TOKEN_AS,
+    TOKEN_TYPE,
+    TOKEN_YIELD,
+    TOKEN_GIVES,
+    TOKEN_POINTER,
+    TOKEN_BREAK,
+    TOKEN_CONTINUE,
+    TOKEN_WHEN,
     TOKEN_CARVE,
+    TOKEN_FLAG,
     TOKEN_ETCH,
     TOKEN_PROBE,
-    TOKEN_THIS,
-    TOKEN_EOF,
-    TOKEN_ERROR
+    TOKEN_NONE,
+    TOKEN_LOOP,
+    TOKEN_IMPORT,
+    TOKEN_FROM,
+    TOKEN_USING,
+    TOKEN_LEFT_ANGLE,
+    TOKEN_RIGHT_ANGLE,
+    TOKEN_COLON,
+    TOKEN_CLASSOF,
+    TOKEN_CAST,
+    TOKEN_NIL,
+    TOKEN_WITHIN,
+    TOKEN_MATCHES,
+    TOKEN_SATISFIES,
+    TOKEN_TEMPLATE,
+    TOKEN_WHERE,
+    TOKEN_INTERFACE,
+    TOKEN_STRUCT,
+    TOKEN_ENUM,
+    TOKEN_IMPLEMENTS,
+    TOKEN_MODULE,
+    TOKEN_EXPORT,
+    TOKEN_PRIVATE,
+    TOKEN_PROTECTED,
+    TOKEN_PUBLIC,
+    TOKEN_STATIC,
+    TOKEN_INLINE,
+    TOKEN_OPERATOR,
+    TOKEN_DEFER,
+    TOKEN_USIZE,
+    TOKEN_ISIZE,
+    TOKEN_FLOAT,
+    TOKEN_DOUBLE,
+    TOKEN_I8,
+    TOKEN_I16,
+    TOKEN_I32,
+    TOKEN_I64,
+    TOKEN_U8,
+    TOKEN_U16,
+    TOKEN_U32,
+    TOKEN_U64,
+    TOKEN_BOOL,
+    TOKEN_BYTE,
+    TOKEN_SIZEOF,
+    TOKEN_ALIGNOF,
+    TOKEN_TRAITOF,
+    TOKEN_OFFSETOF,
+    TOKEN_DEDUCE,
+    TOKEN_ASSIGN,
+    TOKEN_LBRACE_EQUAL,
+    TOKEN_RBRACE_EQUAL,
+    TOKEN_WITHIN_MATCH,
+    TOKEN_MATCH_WITHIN,
+    TOKEN_FLOW,
+    TOKEN_SOURCE,
+    TOKEN_STAGE,
+    TOKEN_SINK,
+    TOKEN_EMIT,
+    TOKEN_PULL,
+    TOKEN_DRAIN,
+    TOKEN_STOP,
+    TOKEN_UNKNOWN
 } TokenType;
 
 typedef struct {
@@ -189,8 +268,17 @@ static Token scanner_error_token(Scanner *scanner, const char *message) {
     return token;
 }
 
-static bool scanner_is_alpha(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+static bool scanner_is_identifier_start(char c) {
+    unsigned char uc = (unsigned char)c;
+    return (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') || uc == '_' || uc >= 0x80;
+}
+
+static bool scanner_is_identifier_part(char c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc >= '0' && uc <= '9') {
+        return true;
+    }
+    return scanner_is_identifier_start(c);
 }
 
 static bool scanner_is_digit(char c) {
@@ -224,12 +312,23 @@ static TokenType scanner_identifier_type(const Token *token) {
                 return TOKEN_CARVE;
             }
             break;
+        case 'd':
+            if (token->length == 5 && memcmp(token->start, "drain", 5) == 0) {
+                return TOKEN_DRAIN;
+            }
+            break;
         case 'e':
             if (token->length == 4 && memcmp(token->start, "else", 4) == 0) {
                 return TOKEN_ELSE;
             }
             if (token->length == 4 && memcmp(token->start, "etch", 4) == 0) {
                 return TOKEN_ETCH;
+            }
+            if (token->length == 6 && memcmp(token->start, "extend", 6) == 0) {
+                return TOKEN_EXTEND;
+            }
+            if (token->length == 4 && memcmp(token->start, "emit", 4) == 0) {
+                return TOKEN_EMIT;
             }
             break;
         case 'f':
@@ -241,6 +340,9 @@ static TokenType scanner_identifier_type(const Token *token) {
             }
             if (token->length == 4 && memcmp(token->start, "flag", 4) == 0) {
                 return TOKEN_FLAG;
+            }
+            if (token->length == 4 && memcmp(token->start, "flow", 4) == 0) {
+                return TOKEN_FLOW;
             }
             break;
         case 'i':
@@ -277,6 +379,26 @@ static TokenType scanner_identifier_type(const Token *token) {
             if (token->length == 5 && memcmp(token->start, "probe", 5) == 0) {
                 return TOKEN_PROBE;
             }
+            if (token->length == 7 && memcmp(token->start, "pointer", 7) == 0) {
+                return TOKEN_POINTER;
+            }
+            if (token->length == 4 && memcmp(token->start, "pull", 4) == 0) {
+                return TOKEN_PULL;
+            }
+            break;
+        case 's':
+            if (token->length == 5 && memcmp(token->start, "stage", 5) == 0) {
+                return TOKEN_STAGE;
+            }
+            if (token->length == 4 && memcmp(token->start, "sink", 4) == 0) {
+                return TOKEN_SINK;
+            }
+            if (token->length == 6 && memcmp(token->start, "source", 6) == 0) {
+                return TOKEN_SOURCE;
+            }
+            if (token->length == 4 && memcmp(token->start, "stop", 4) == 0) {
+                return TOKEN_STOP;
+            }
             break;
         case 't':
             if (token->length == 4 && memcmp(token->start, "true", 4) == 0) {
@@ -292,6 +414,9 @@ static TokenType scanner_identifier_type(const Token *token) {
         case 'w':
             if (token->length == 5 && memcmp(token->start, "while", 5) == 0) {
                 return TOKEN_WHILE;
+            }
+            if (token->length == 4 && memcmp(token->start, "with", 4) == 0) {
+                return TOKEN_WITH;
             }
             break;
         case 'r':
@@ -316,7 +441,7 @@ static TokenType scanner_identifier_type(const Token *token) {
 }
 
 static Token scanner_identifier(Scanner *scanner) {
-    while (scanner_is_alpha(scanner_peek(scanner)) || scanner_is_digit(scanner_peek(scanner))) {
+    while (scanner_is_identifier_part(scanner_peek(scanner))) {
         scanner_advance(scanner);
     }
     Token token = scanner_make_token(scanner, TOKEN_IDENTIFIER);
@@ -361,7 +486,7 @@ static Token scanner_scan_token(Scanner *scanner) {
 
     char c = scanner_advance(scanner);
 
-    if (scanner_is_alpha(c)) {
+    if (scanner_is_identifier_start(c)) {
         return scanner_identifier(scanner);
     }
     if (scanner_is_digit(c)) {
@@ -378,6 +503,7 @@ static Token scanner_scan_token(Scanner *scanner) {
         case ';': return scanner_make_token(scanner, TOKEN_SEMICOLON);
         case ',': return scanner_make_token(scanner, TOKEN_COMMA);
         case '.': return scanner_make_token(scanner, TOKEN_DOT);
+    case '&': return scanner_make_token(scanner, TOKEN_AMPERSAND);
         case '-': return scanner_make_token(scanner, TOKEN_MINUS);
         case '+': return scanner_make_token(scanner, TOKEN_PLUS);
     case '|': return scanner_make_token(scanner, TOKEN_PIPE);
@@ -424,6 +550,7 @@ typedef struct Local {
     uint8_t depth;
     bool is_const;
     ProtoTypeTag type_tag;
+    ProtoFunction *function_value;
 } Local;
 
 typedef struct CompilerContext {
@@ -433,13 +560,56 @@ typedef struct CompilerContext {
     int local_count;
     int scope_depth;
     ProtoTypeTag expected_return;
+    Token type_params[PROTOHACK_MAX_TYPE_PARAMS];
+    uint8_t type_param_count;
+    ProtoTypeBindingSet bindings;
     struct CompilerContext *enclosing;
 } CompilerContext;
 
 typedef struct ClassCompiler {
     Token name;
+    Token type_params[PROTOHACK_MAX_TYPE_PARAMS];
+    char type_param_names[PROTOHACK_MAX_TYPE_PARAMS][PROTOHACK_MAX_IDENTIFIER + 1];
+    uint8_t type_param_count;
+    ProtoTypeBindingSet bindings;
     struct ClassCompiler *enclosing;
 } ClassCompiler;
+
+typedef struct TypeParameterList {
+    Token tokens[PROTOHACK_MAX_TYPE_PARAMS];
+    char names[PROTOHACK_MAX_TYPE_PARAMS][PROTOHACK_MAX_IDENTIFIER + 1];
+    uint8_t count;
+} TypeParameterList;
+
+#define PROTOHACK_MAX_TEMPLATE_NAME 192
+#define PROTOHACK_MAX_FUNCTION_TEMPLATES 128
+#define PROTOHACK_MAX_FUNCTION_SPECIALIZATIONS 256
+
+typedef struct TemplateArg {
+    ProtoTypeTag tag;
+    int8_t param_index;
+    const CompilerContext *context;
+    const ClassCompiler *klass;
+    bool unresolved;
+    char label[PROTOHACK_MAX_IDENTIFIER + 1];
+} TemplateArg;
+
+typedef struct TemplateArgList {
+    TemplateArg args[PROTOHACK_MAX_TYPE_PARAMS];
+    uint8_t count;
+} TemplateArgList;
+
+typedef struct FunctionTemplateEntry {
+    char name[PROTOHACK_MAX_IDENTIFIER + 1];
+    ProtoFunction *function;
+    uint8_t type_param_count;
+} FunctionTemplateEntry;
+
+typedef struct FunctionSpecializationEntry {
+    char name[PROTOHACK_MAX_TEMPLATE_NAME];
+    uint16_t constant_index;
+    ProtoFunction *function;
+} FunctionSpecializationEntry;
 
 typedef struct Parser {
     Scanner scanner;
@@ -452,11 +622,23 @@ typedef struct Parser {
     struct {
         bool defined[PROTOHACK_MAX_GLOBALS];
         bool is_const[PROTOHACK_MAX_GLOBALS];
+        ProtoTypeTag type_tags[PROTOHACK_MAX_GLOBALS];
+        ProtoFunction *functions[PROTOHACK_MAX_GLOBALS];
     } globals;
     int initializing_global;
     CompilerContext *compiler;
     CompilerContext root;
     ClassCompiler *current_class;
+    struct {
+        FunctionTemplateEntry function_templates[PROTOHACK_MAX_FUNCTION_TEMPLATES];
+        size_t function_template_count;
+        FunctionSpecializationEntry function_specializations[PROTOHACK_MAX_FUNCTION_SPECIALIZATIONS];
+        size_t function_specialization_count;
+    } generics;
+    ProtoTypeTag expression_type;
+    ProtoFunction *recent_function_value;
+    ProtoTypeTag argument_types[PROTOHACK_MAX_PARAMS];
+    uint8_t argument_count;
 } Parser;
 
 static void parser_advance(Parser *parser);
@@ -465,6 +647,7 @@ static void declaration(Parser *parser);
 static ParseRule *get_rule(TokenType type);
 static void parse_precedence(Parser *parser, Precedence precedence);
 static void statement(Parser *parser);
+static void error(Parser *parser, const char *message);
 static void let_declaration(Parser *parser, bool is_const);
 static CompilerContext *current_context(Parser *parser);
 static void begin_scope(Parser *parser);
@@ -472,6 +655,9 @@ static void end_scope(Parser *parser);
 static void add_local(Parser *parser, Token name, bool is_const, ProtoTypeTag type_tag);
 static int resolve_local(Parser *parser, Token name);
 static void mark_initialized(Parser *parser);
+static bool resolve_type_parameter_source(Parser *parser, const Token *identifier, int8_t *out_index, const CompilerContext **out_context, const ClassCompiler **out_class);
+static int8_t resolve_type_parameter_index(Parser *parser, const Token *identifier);
+static ProtoTypeTag parse_type_annotation(Parser *parser, int8_t *out_type_param_index);
 static ProtoTypeTag parse_type_tag(Parser *parser);
 static ProtoTypeTag require_callable_type(Parser *parser, const char *message);
 static void emit_byte(Parser *parser, uint8_t byte);
@@ -482,14 +668,258 @@ static void parse_carve(Parser *parser, bool can_assign);
 static void parse_probe(Parser *parser, bool can_assign);
 static void craft_declaration(Parser *parser);
 static void class_declaration(Parser *parser);
+static void extend_declaration(Parser *parser);
+static void extension_spec_reset(ProtoExtensionTypeSpec *spec);
+static bool populate_extension_spec(Parser *parser, const Token *token, const char *name, const TemplateArgList *args, ProtoExtensionTypeSpec *out_spec);
 static void method_declaration(Parser *parser, Token class_name);
 static void parse_function_body(Parser *parser, ProtoFunction *function);
 static void yield_statement(Parser *parser);
 static void etch_statement(Parser *parser);
 static void sync_function_globals(Parser *parser, ProtoChunk *chunk);
+static void finalize_module_metadata(Parser *parser);
 static bool token_to_identifier(const Token *token, char *buffer, size_t buffer_size);
 static void parse_this(Parser *parser, bool can_assign);
 static void parse_dot(Parser *parser, bool can_assign);
+static void parse_address(Parser *parser, bool can_assign);
+static void parse_pointer_deref(Parser *parser, bool can_assign);
+static void emit_address_of_local(Parser *parser, uint8_t slot, bool is_const, size_t line);
+static void emit_address_of_global(Parser *parser, uint16_t index, bool is_const, size_t line);
+static bool tokens_equal(const Token *a, const Token *b);
+static bool identifier_matches_type_param(const Token *identifier, const Token *param);
+static bool is_type_parameter(Parser *parser, const Token *identifier);
+static void parse_type_parameter_list(Parser *parser, const char *context_label, TypeParameterList *list);
+static bool parse_template_type_atom(Parser *parser, TemplateArg *out_arg);
+static bool try_parse_template_arguments(Parser *parser, TemplateArgList *out_args);
+static FunctionTemplateEntry *find_function_template(Parser *parser, const char *name);
+static bool register_function_template(Parser *parser, const char *name, ProtoFunction *function, uint8_t type_param_count);
+static FunctionSpecializationEntry *find_function_specialization(Parser *parser, const char *name);
+static bool add_function_specialization(Parser *parser, const char *name, uint16_t constant_index, ProtoFunction *function);
+static bool ensure_function_specialization(Parser *parser, const Token *name_token, const char *base_name, const TemplateArgList *args, uint16_t *out_constant_index, ProtoFunction **out_function);
+static void emit_constant_index(Parser *parser, uint16_t index, size_t line);
+static void compiler_context_reset_bindings(CompilerContext *context);
+static void class_compiler_reset_bindings(ClassCompiler *klass);
+static ProtoTypeBinding resolve_template_argument_binding(const TemplateArg *arg);
+static void parser_reset_expression(Parser *parser);
+static void parser_set_expression(Parser *parser, ProtoTypeTag type, ProtoFunction *function);
+static void validate_call_arguments(Parser *parser, const Token *name_token, const ProtoFunction *function, uint8_t provided_count);
+static bool extension_binding_is_concrete(const ProtoTypeBinding *binding);
+static bool validate_extension_contract(Parser *parser, const Token *target_token, ProtoExtensionDecl *decl);
+static const ProtoFunction *resolve_extension_craft_template(Parser *parser, const ProtoExtensionDecl *decl);
+static ProtoTypeTag resolve_extension_specialized_type(const ProtoFunction *template_function,
+                                                       const ProtoTypeBindingSet *bindings,
+                                                       ProtoTypeTag default_tag,
+                                                       int8_t binding_index);
+static void extend_craft(Parser *parser, Token keyword);
+
+static void compiler_context_reset_bindings(CompilerContext *context) {
+    if (!context) {
+        return;
+    }
+    context->bindings.count = 0;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        context->bindings.entries[i].tag = PROTO_TYPE_ANY;
+        context->bindings.entries[i].param = -1;
+    }
+    uint8_t param_count = context->type_param_count;
+    if (param_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        param_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    context->bindings.count = param_count;
+    for (uint8_t i = 0; i < param_count; ++i) {
+        context->bindings.entries[i].param = (int8_t)i;
+    }
+    if (!context->function) {
+        return;
+    }
+    const ProtoFunction *function = context->function;
+    uint8_t binding_count = function->bindings.count;
+    if (binding_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        binding_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    if (binding_count > context->bindings.count) {
+        context->bindings.count = binding_count;
+    }
+    for (uint8_t i = 0; i < binding_count; ++i) {
+        context->bindings.entries[i] = function->bindings.entries[i];
+    }
+    uint8_t arg_count = function->type_argument_count;
+    if (arg_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        arg_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    if (arg_count > context->bindings.count) {
+        context->bindings.count = arg_count;
+    }
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        ProtoTypeTag argument = function->type_arguments[i];
+        if (argument != PROTO_TYPE_ANY) {
+            context->bindings.entries[i].tag = argument;
+            context->bindings.entries[i].param = -1;
+        }
+    }
+}
+
+static void class_compiler_reset_bindings(ClassCompiler *klass) {
+    if (!klass) {
+        return;
+    }
+    klass->bindings.count = 0;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        klass->bindings.entries[i].tag = PROTO_TYPE_ANY;
+        klass->bindings.entries[i].param = -1;
+    }
+    uint8_t param_count = klass->type_param_count;
+    if (param_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        param_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    klass->bindings.count = param_count;
+    for (uint8_t i = 0; i < param_count; ++i) {
+        klass->bindings.entries[i].param = (int8_t)i;
+    }
+}
+
+static ProtoTypeBinding resolve_template_argument_binding(const TemplateArg *arg) {
+    ProtoTypeBinding binding;
+    binding.tag = PROTO_TYPE_ANY;
+    binding.param = -1;
+
+    if (!arg) {
+        return binding;
+    }
+
+    if (arg->param_index >= 0) {
+        binding.param = arg->param_index;
+    }
+
+    const ProtoTypeBinding *source = NULL;
+    if (arg->context && arg->param_index >= 0 && (uint8_t)arg->param_index < arg->context->bindings.count) {
+        source = &arg->context->bindings.entries[arg->param_index];
+    } else if (arg->klass && arg->param_index >= 0 && (uint8_t)arg->param_index < arg->klass->bindings.count) {
+        source = &arg->klass->bindings.entries[arg->param_index];
+    }
+
+    if (source) {
+        binding = *source;
+        if (binding.tag == PROTO_TYPE_ANY && binding.param < 0 && arg->param_index >= 0) {
+            binding.param = arg->param_index;
+        }
+    }
+
+    if (binding.tag == PROTO_TYPE_ANY && arg->tag != PROTO_TYPE_ANY) {
+        binding.tag = arg->tag;
+        binding.param = -1;
+    }
+
+    if (binding.tag != PROTO_TYPE_ANY) {
+        binding.param = -1;
+    }
+
+    return binding;
+}
+
+static void extension_spec_reset(ProtoExtensionTypeSpec *spec) {
+    if (!spec) {
+        return;
+    }
+    memset(spec->name, 0, sizeof spec->name);
+    spec->label_count = 0;
+    spec->bindings.count = 0;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        spec->bindings.entries[i].tag = PROTO_TYPE_ANY;
+        spec->bindings.entries[i].param = -1;
+        memset(spec->labels[i], 0, sizeof spec->labels[i]);
+    }
+}
+
+static bool populate_extension_spec(Parser *parser, const Token *token, const char *name, const TemplateArgList *args, ProtoExtensionTypeSpec *out_spec) {
+    if (!parser || !name || !out_spec) {
+        return false;
+    }
+
+    TemplateArgList empty_args = {0};
+    const TemplateArgList *list = args ? args : &empty_args;
+
+    extension_spec_reset(out_spec);
+    strncpy(out_spec->name, name, sizeof out_spec->name - 1);
+    out_spec->name[sizeof out_spec->name - 1] = '\0';
+
+    if (list->count > PROTOHACK_MAX_TYPE_PARAMS) {
+        char message[128];
+        snprintf(message, sizeof message, "Too many type arguments supplied to '%s'", name);
+        Token saved = parser->previous;
+        if (token) {
+            parser->previous = *token;
+        }
+        error(parser, message);
+        if (token) {
+            parser->previous = saved;
+        }
+        return false;
+    }
+
+    uint8_t arg_count = list->count;
+    out_spec->bindings.count = arg_count;
+
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        const TemplateArg *arg = &list->args[i];
+        ProtoTypeBinding binding = resolve_template_argument_binding(arg);
+        out_spec->bindings.entries[i] = binding;
+
+        const char *label = arg->label;
+        if (!label || label[0] == '\0') {
+            if (arg->tag != PROTO_TYPE_ANY) {
+                label = proto_type_tag_name(arg->tag);
+            }
+        }
+        if (!label) {
+            label = "";
+        }
+        strncpy(out_spec->labels[i], label, sizeof out_spec->labels[i] - 1);
+        out_spec->labels[i][sizeof out_spec->labels[i] - 1] = '\0';
+
+        bool unresolved = arg->unresolved;
+        bool missing_binding = (!unresolved && binding.tag == PROTO_TYPE_ANY && binding.param < 0);
+        if (unresolved || missing_binding) {
+            char message[256];
+            const char *display = out_spec->labels[i];
+            if (!display || display[0] == '\0') {
+                display = "unknown";
+            }
+            if (unresolved) {
+                snprintf(message, sizeof message, "Unknown type argument '%s' supplied to '%s'", display, name);
+            } else {
+                snprintf(message, sizeof message, "Unable to resolve type argument %u for '%s'", (unsigned)(i + 1), name);
+            }
+            Token saved = parser->previous;
+            if (token) {
+                parser->previous = *token;
+            }
+            error(parser, message);
+            if (token) {
+                parser->previous = saved;
+            }
+            return false;
+        }
+    }
+
+    out_spec->label_count = arg_count;
+    return true;
+}
+
+static void parser_reset_expression(Parser *parser) {
+    if (!parser) {
+        return;
+    }
+    parser->expression_type = PROTO_TYPE_ANY;
+    parser->recent_function_value = NULL;
+}
+
+static void parser_set_expression(Parser *parser, ProtoTypeTag type, ProtoFunction *function) {
+    if (!parser) {
+        return;
+    }
+    parser->expression_type = type;
+    parser->recent_function_value = function;
+}
 
 static void parser_init(Parser *parser, const char *source, ProtoChunk *chunk, ProtoError *error) {
     scanner_init(&parser->scanner, source);
@@ -499,15 +929,28 @@ static void parser_init(Parser *parser, const char *source, ProtoChunk *chunk, P
     parser->error = error;
     memset(parser->globals.defined, 0, sizeof parser->globals.defined);
     memset(parser->globals.is_const, 0, sizeof parser->globals.is_const);
+    memset(parser->globals.type_tags, 0, sizeof parser->globals.type_tags);
+    memset(parser->globals.functions, 0, sizeof parser->globals.functions);
     parser->initializing_global = -1;
     parser->root.function = NULL;
     parser->root.chunk = chunk;
     parser->root.local_count = 0;
     parser->root.scope_depth = 0;
     parser->root.expected_return = PROTO_TYPE_NONE;
+    parser->root.type_param_count = 0;
+    memset(parser->root.type_params, 0, sizeof parser->root.type_params);
+    compiler_context_reset_bindings(&parser->root);
     parser->root.enclosing = NULL;
     parser->compiler = &parser->root;
     parser->current_class = NULL;
+    memset(parser->generics.function_templates, 0, sizeof parser->generics.function_templates);
+    parser->generics.function_template_count = 0;
+    memset(parser->generics.function_specializations, 0, sizeof parser->generics.function_specializations);
+    parser->generics.function_specialization_count = 0;
+    parser->expression_type = PROTO_TYPE_ANY;
+    parser->recent_function_value = NULL;
+    memset(parser->argument_types, 0, sizeof parser->argument_types);
+    parser->argument_count = 0;
 }
 
 static void includebuf_init(IncludeBuffer *buffer) {
@@ -1059,6 +1502,7 @@ static void add_local(Parser *parser, Token name, bool is_const, ProtoTypeTag ty
     local->depth = 255;
     local->is_const = is_const;
     local->type_tag = type_tag;
+    local->function_value = NULL;
 }
 
 static void begin_scope(Parser *parser) {
@@ -1112,7 +1556,10 @@ static void mark_initialized(Parser *parser) {
     }
 }
 
-static ProtoTypeTag parse_type_tag(Parser *parser) {
+static ProtoTypeTag parse_type_annotation(Parser *parser, int8_t *out_type_param_index) {
+    if (out_type_param_index) {
+        *out_type_param_index = -1;
+    }
     switch (parser->current.type) {
         case TOKEN_NUMERIC:
             parser_advance(parser);
@@ -1126,13 +1573,32 @@ static ProtoTypeTag parse_type_tag(Parser *parser) {
         case TOKEN_RAW:
             parser_advance(parser);
             return PROTO_TYPE_RAW;
+        case TOKEN_POINTER:
+            parser_advance(parser);
+            return PROTO_TYPE_PTR;
         case TOKEN_NONE:
             parser_advance(parser);
             return PROTO_TYPE_NONE;
+        case TOKEN_IDENTIFIER: {
+            Token identifier = parser->current;
+            if (is_type_parameter(parser, &identifier)) {
+                if (out_type_param_index) {
+                    *out_type_param_index = resolve_type_parameter_index(parser, &identifier);
+                }
+                parser_advance(parser);
+                return PROTO_TYPE_ANY;
+            }
+            error_at_current(parser, "Unknown type name");
+            return PROTO_TYPE_ANY;
+        }
         default:
             error_at_current(parser, "Expect type specifier");
             return PROTO_TYPE_ANY;
     }
+}
+
+static ProtoTypeTag parse_type_tag(Parser *parser) {
+    return parse_type_annotation(parser, NULL);
 }
 
 static void emit_byte(Parser *parser, uint8_t byte) {
@@ -1147,6 +1613,18 @@ static void emit_get_local(Parser *parser, uint8_t slot, size_t line) {
 static void emit_set_local(Parser *parser, uint8_t slot, size_t line) {
     protochunk_write(current_chunk(parser), PROTO_OP_SET_LOCAL, line);
     protochunk_write(current_chunk(parser), slot, line);
+}
+
+static void emit_address_of_local(Parser *parser, uint8_t slot, bool is_const, size_t line) {
+    protochunk_write(current_chunk(parser), PROTO_OP_ADDR_LOCAL, line);
+    protochunk_write(current_chunk(parser), slot, line);
+    protochunk_write(current_chunk(parser), is_const ? 1u : 0u, line);
+}
+
+static void emit_address_of_global(Parser *parser, uint16_t index, bool is_const, size_t line) {
+    protochunk_write(current_chunk(parser), PROTO_OP_ADDR_GLOBAL, line);
+    protochunk_write_u16(current_chunk(parser), index, line);
+    protochunk_write(current_chunk(parser), is_const ? 1u : 0u, line);
 }
 
 static void emit_return(Parser *parser) {
@@ -1190,6 +1668,8 @@ static void emit_set_global(Parser *parser, const Token *name_token, uint16_t in
 
 static uint8_t parse_call_arguments(Parser *parser) {
     uint16_t arg_count = 0;
+    ProtoTypeTag recorded[PROTOHACK_MAX_PARAMS] = {0};
+    uint8_t recorded_count = 0;
     if (!check(parser, TOKEN_RIGHT_PAREN)) {
         do {
             parse_expression(parser);
@@ -1198,9 +1678,16 @@ static uint8_t parse_call_arguments(Parser *parser) {
             } else {
                 arg_count++;
             }
+            if (recorded_count < PROTOHACK_MAX_PARAMS) {
+                recorded[recorded_count++] = parser->expression_type;
+            }
         } while (match(parser, TOKEN_COMMA));
     }
     consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
+    parser->argument_count = recorded_count;
+    if (recorded_count > 0) {
+        memcpy(parser->argument_types, recorded, recorded_count * sizeof(ProtoTypeTag));
+    }
     if (arg_count > 255u) {
         return 255u;
     }
@@ -1243,6 +1730,688 @@ static bool token_to_identifier(const Token *token, char *buffer, size_t buffer_
     memcpy(buffer, token->start, token->length);
     buffer[token->length] = '\0';
     return true;
+}
+
+static bool tokens_equal(const Token *a, const Token *b) {
+    if (!a || !b) {
+        return false;
+    }
+    if (a->length != b->length) {
+        return false;
+    }
+    if (a->length == 0) {
+        return true;
+    }
+    return memcmp(a->start, b->start, a->length) == 0;
+}
+
+static bool identifier_matches_type_param(const Token *identifier, const Token *param) {
+    if (!identifier || !param) {
+        return false;
+    }
+    if (param->type != TOKEN_IDENTIFIER) {
+        return false;
+    }
+    return tokens_equal(identifier, param);
+}
+
+static bool is_type_parameter(Parser *parser, const Token *identifier) {
+    if (!parser || !identifier) {
+        return false;
+    }
+    CompilerContext *context = parser->compiler;
+    while (context) {
+        for (uint8_t i = 0; i < context->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            if (identifier_matches_type_param(identifier, &context->type_params[i])) {
+                return true;
+            }
+        }
+        context = context->enclosing;
+    }
+
+    ClassCompiler *klass = parser->current_class;
+    while (klass) {
+        for (uint8_t i = 0; i < klass->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            if (identifier_matches_type_param(identifier, &klass->type_params[i])) {
+                return true;
+            }
+        }
+        klass = klass->enclosing;
+    }
+
+    return false;
+}
+
+static bool resolve_type_parameter_source(Parser *parser, const Token *identifier, int8_t *out_index, const CompilerContext **out_context, const ClassCompiler **out_class) {
+    if (out_index) {
+        *out_index = -1;
+    }
+    if (out_context) {
+        *out_context = NULL;
+    }
+    if (out_class) {
+        *out_class = NULL;
+    }
+    if (!parser || !identifier) {
+        return false;
+    }
+
+    CompilerContext *context = parser->compiler;
+    while (context) {
+        for (uint8_t i = 0; i < context->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            if (identifier_matches_type_param(identifier, &context->type_params[i])) {
+                if (out_index) {
+                    *out_index = (int8_t)i;
+                }
+                if (out_context) {
+                    *out_context = context;
+                }
+                return true;
+            }
+        }
+        context = context->enclosing;
+    }
+
+    ClassCompiler *klass = parser->current_class;
+    while (klass) {
+        for (uint8_t i = 0; i < klass->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            if (identifier_matches_type_param(identifier, &klass->type_params[i])) {
+                if (out_index) {
+                    *out_index = (int8_t)i;
+                }
+                if (out_class) {
+                    *out_class = klass;
+                }
+                return true;
+            }
+        }
+        klass = klass->enclosing;
+    }
+
+    return false;
+}
+
+static int8_t resolve_type_parameter_index(Parser *parser, const Token *identifier) {
+    int8_t index = -1;
+    if (resolve_type_parameter_source(parser, identifier, &index, NULL, NULL)) {
+        return index;
+    }
+    return -1;
+}
+
+static void parse_type_parameter_list(Parser *parser, const char *context_label, TypeParameterList *list) {
+    if (!list) {
+        return;
+    }
+
+    list->count = 0;
+    const char *label = context_label ? context_label : "declaration";
+
+    if (!match(parser, TOKEN_LESS)) {
+        return;
+    }
+
+    if (match(parser, TOKEN_GREATER)) {
+        return;
+    }
+
+    do {
+        consume(parser, TOKEN_IDENTIFIER, "Expect type parameter name");
+        Token param = parser->previous;
+
+        bool skip_storage = false;
+        if (list->count >= PROTOHACK_MAX_TYPE_PARAMS) {
+            char message[128];
+            snprintf(message, sizeof message, "Too many type parameters for %s (max %d)", label, PROTOHACK_MAX_TYPE_PARAMS);
+            error(parser, message);
+            skip_storage = true;
+        }
+
+        char buffer[PROTOHACK_MAX_IDENTIFIER + 1] = {0};
+        bool buffer_ok = token_to_identifier(&param, buffer, sizeof buffer);
+        if (!buffer_ok) {
+            char message[128];
+            snprintf(message, sizeof message, "Type parameter name is too long in %s", label);
+            error(parser, message);
+        }
+
+        bool duplicate = false;
+        if (buffer_ok) {
+            for (uint8_t i = 0; i < list->count; ++i) {
+                if (strcmp(list->names[i], buffer) == 0) {
+                    duplicate = true;
+                    char message[128];
+                    snprintf(message, sizeof message, "Duplicate type parameter '%s' in %s", buffer, label);
+                    error(parser, message);
+                    break;
+                }
+            }
+        }
+
+        if (!skip_storage && buffer_ok && !duplicate && list->count < PROTOHACK_MAX_TYPE_PARAMS) {
+            list->tokens[list->count] = param;
+            memcpy(list->names[list->count], buffer, sizeof list->names[list->count]);
+            list->count++;
+        }
+    } while (match(parser, TOKEN_COMMA));
+
+    char end_message[128];
+    snprintf(end_message, sizeof end_message, "Expect '>' after type parameters in %s", label);
+    consume(parser, TOKEN_GREATER, end_message);
+}
+
+static bool parse_template_type_atom(Parser *parser, TemplateArg *out_arg) {
+    if (!parser || !out_arg) {
+        return false;
+    }
+
+    TemplateArg result = {0};
+    result.param_index = -1;
+    result.context = NULL;
+    result.klass = NULL;
+    switch (parser->current.type) {
+        case TOKEN_NUMERIC:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_NUM;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_NUM), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_FLAG:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_FLAG;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_FLAG), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_TEXT:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_TEXT;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_TEXT), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_RAW:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_RAW;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_RAW), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_POINTER:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_PTR;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_PTR), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_NONE:
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_NONE;
+            strncpy(result.label, proto_type_tag_name(PROTO_TYPE_NONE), sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        case TOKEN_IDENTIFIER: {
+            Token identifier = parser->current;
+            char buffer[PROTOHACK_MAX_IDENTIFIER + 1] = {0};
+            if (!token_to_identifier(&identifier, buffer, sizeof buffer)) {
+                return false;
+            }
+
+            const CompilerContext *binding_context = NULL;
+            const ClassCompiler *binding_class = NULL;
+            int8_t binding_index = -1;
+            bool resolved = resolve_type_parameter_source(parser, &identifier, &binding_index, &binding_context, &binding_class);
+
+            parser_advance(parser);
+            result.tag = PROTO_TYPE_ANY;
+            result.param_index = resolved ? binding_index : -1;
+            result.context = resolved ? binding_context : NULL;
+            result.klass = resolved ? binding_class : NULL;
+            result.unresolved = !resolved;
+            strncpy(result.label, buffer, sizeof result.label - 1);
+            result.label[sizeof result.label - 1] = '\0';
+            break;
+        }
+        default:
+            return false;
+    }
+
+    *out_arg = result;
+    return true;
+}
+
+static bool try_parse_template_arguments(Parser *parser, TemplateArgList *out_args) {
+    if (!parser || parser->current.type != TOKEN_LESS) {
+        return false;
+    }
+
+    Scanner backup_scanner = parser->scanner;
+    Token backup_current = parser->current;
+    Token backup_previous = parser->previous;
+    bool backup_had_error = parser->had_error;
+    bool backup_panic = parser->panic_mode;
+
+    parser_advance(parser);
+    TemplateArgList parsed = {0};
+
+    if (parser->current.type == TOKEN_GREATER) {
+        parser_advance(parser);
+    } else {
+        do {
+            if (parsed.count >= PROTOHACK_MAX_TYPE_PARAMS) {
+                goto parse_fail;
+            }
+            TemplateArg arg = {0};
+            if (!parse_template_type_atom(parser, &arg)) {
+                goto parse_fail;
+            }
+            parsed.args[parsed.count++] = arg;
+        } while (match(parser, TOKEN_COMMA));
+
+        if (!match(parser, TOKEN_GREATER)) {
+            goto parse_fail;
+        }
+    }
+
+    if (out_args) {
+        *out_args = parsed;
+    }
+    return true;
+
+parse_fail:
+    parser->scanner = backup_scanner;
+    parser->current = backup_current;
+    parser->previous = backup_previous;
+    parser->had_error = backup_had_error;
+    parser->panic_mode = backup_panic;
+    return false;
+}
+
+static FunctionTemplateEntry *find_function_template(Parser *parser, const char *name) {
+    if (!parser || !name) {
+        return NULL;
+    }
+    for (size_t i = 0; i < parser->generics.function_template_count; ++i) {
+        FunctionTemplateEntry *entry = &parser->generics.function_templates[i];
+        if (entry->name[0] != '\0' && strcmp(entry->name, name) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static bool register_function_template(Parser *parser, const char *name, ProtoFunction *function, uint8_t type_param_count) {
+    if (!parser || !name || !function) {
+        return false;
+    }
+
+    FunctionTemplateEntry *existing = find_function_template(parser, name);
+    if (existing) {
+        existing->function = function;
+        existing->type_param_count = type_param_count;
+        return true;
+    }
+
+    if (parser->generics.function_template_count >= PROTOHACK_MAX_FUNCTION_TEMPLATES) {
+        return false;
+    }
+
+    FunctionTemplateEntry *entry = &parser->generics.function_templates[parser->generics.function_template_count++];
+    strncpy(entry->name, name, sizeof entry->name - 1);
+    entry->name[sizeof entry->name - 1] = '\0';
+    entry->function = function;
+    entry->type_param_count = type_param_count;
+    return true;
+}
+
+static bool extension_binding_is_concrete(const ProtoTypeBinding *binding) {
+    if (!binding) {
+        return false;
+    }
+    if (binding->param >= 0) {
+        return false;
+    }
+    return binding->tag != PROTO_TYPE_ANY;
+}
+
+static void raise_extension_error(Parser *parser, const Token *target_token, const char *message) {
+    Token previous = parser->previous;
+    if (target_token != NULL) {
+        parser->previous = *target_token;
+    }
+    error(parser, message);
+    parser->previous = previous;
+}
+
+static bool validate_extension_contract(Parser *parser, const Token *target_token, ProtoExtensionDecl *decl) {
+    if (!decl) {
+        return false;
+    }
+
+    bool ok = true;
+
+    if (decl->target_kind == PROTO_EXTENSION_TARGET_CRAFT) {
+        ProtoFunction *craft = NULL;
+        ProtoChunk *global_chunk = parser ? parser->chunk : NULL;
+        if (global_chunk != NULL) {
+            int global_index = protochunk_find_global(global_chunk, decl->target.name);
+            if (global_index >= 0 && parser->globals.defined[global_index]) {
+                craft = parser->globals.functions[global_index];
+            }
+        }
+        if (craft == NULL) {
+            FunctionSpecializationEntry *specialization = find_function_specialization(parser, decl->target.name);
+            if (specialization != NULL) {
+                craft = specialization->function;
+            }
+        }
+        if (craft == NULL) {
+            FunctionTemplateEntry *tpl = find_function_template(parser, decl->target.name);
+            if (tpl != NULL) {
+                craft = tpl->function;
+            }
+        }
+
+        if (craft == NULL || craft->kind != PROTO_FUNC_CRAFT) {
+            raise_extension_error(parser, target_token, "Craft extension target must be a declared craft function");
+            return false;
+        }
+
+        uint8_t expected = craft->type_param_count;
+        uint8_t provided = decl->target.bindings.count;
+
+        if (expected == 0) {
+            if (provided > 0) {
+                raise_extension_error(parser, target_token, "Craft does not accept type arguments");
+                ok = false;
+            }
+        } else {
+            if (provided == 0) {
+                char message[128];
+                snprintf(message, sizeof(message), "Craft '%s' requires %u type argument%s", decl->target.name, expected, expected == 1 ? "" : "s");
+                raise_extension_error(parser, target_token, message);
+                ok = false;
+            } else if (provided != expected) {
+                char message[128];
+                snprintf(message, sizeof(message), "Craft '%s' expects %u type argument%s but %u provided", decl->target.name, expected, expected == 1 ? "" : "s", provided);
+                raise_extension_error(parser, target_token, message);
+                ok = false;
+            }
+
+            for (uint8_t i = 0; ok && i < provided; ++i) {
+                if (!extension_binding_is_concrete(&decl->target.bindings.entries[i])) {
+                    char message[160];
+                    snprintf(message, sizeof(message), "Extension must specialize craft '%s' with concrete type arguments", decl->target.name);
+                    raise_extension_error(parser, target_token, message);
+                    ok = false;
+                }
+            }
+        }
+    }
+
+    for (uint8_t i = 0; i < decl->trait_count; ++i) {
+        const ProtoExtensionTypeSpec *trait = &decl->traits[i];
+        for (uint8_t j = 0; j < trait->bindings.count; ++j) {
+            if (!extension_binding_is_concrete(&trait->bindings.entries[j])) {
+                char message[160];
+                snprintf(message, sizeof(message), "Trait '%s' in extension requires concrete type arguments", trait->name);
+                raise_extension_error(parser, target_token, message);
+                return false;
+            }
+        }
+    }
+
+    return ok;
+}
+
+static const ProtoFunction *resolve_extension_craft_template(Parser *parser, const ProtoExtensionDecl *decl) {
+    if (!parser || !decl) {
+        return NULL;
+    }
+
+    const char *name = decl->target.name;
+    if (!name || name[0] == '\0') {
+        return NULL;
+    }
+
+    ProtoChunk *chunk = parser->chunk;
+    if (chunk) {
+        int global_index = protochunk_find_global(chunk, name);
+        if (global_index >= 0 && parser->globals.defined[global_index]) {
+            ProtoFunction *fn = parser->globals.functions[global_index];
+            if (fn && fn->kind == PROTO_FUNC_CRAFT) {
+                return fn;
+            }
+        }
+    }
+
+    FunctionTemplateEntry *tpl = find_function_template(parser, name);
+    if (tpl && tpl->function && tpl->function->kind == PROTO_FUNC_CRAFT) {
+        return tpl->function;
+    }
+
+    FunctionSpecializationEntry *spec = find_function_specialization(parser, name);
+    if (spec && spec->function && spec->function->kind == PROTO_FUNC_CRAFT) {
+        return spec->function->template_origin ? spec->function->template_origin : spec->function;
+    }
+
+    return NULL;
+}
+
+static ProtoTypeTag resolve_extension_specialized_type(const ProtoFunction *template_function,
+                                                       const ProtoTypeBindingSet *bindings,
+                                                       ProtoTypeTag default_tag,
+                                                       int8_t binding_index) {
+    if (!bindings) {
+        return default_tag;
+    }
+
+    if (binding_index >= 0 && (uint8_t)binding_index < bindings->count) {
+        const ProtoTypeBinding *binding = &bindings->entries[(uint8_t)binding_index];
+        if (binding->tag != PROTO_TYPE_ANY && binding->param < 0) {
+            return binding->tag;
+        }
+    }
+
+    (void)template_function;
+    return default_tag;
+}
+
+static FunctionSpecializationEntry *find_function_specialization(Parser *parser, const char *name) {
+    if (!parser || !name) {
+        return NULL;
+    }
+    for (size_t i = 0; i < parser->generics.function_specialization_count; ++i) {
+        FunctionSpecializationEntry *entry = &parser->generics.function_specializations[i];
+        if (entry->name[0] != '\0' && strcmp(entry->name, name) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static bool add_function_specialization(Parser *parser, const char *name, uint16_t constant_index, ProtoFunction *function) {
+    if (!parser || !name) {
+        return false;
+    }
+    if (parser->generics.function_specialization_count >= PROTOHACK_MAX_FUNCTION_SPECIALIZATIONS) {
+        return false;
+    }
+    FunctionSpecializationEntry *entry = &parser->generics.function_specializations[parser->generics.function_specialization_count++];
+    strncpy(entry->name, name, sizeof entry->name - 1);
+    entry->name[sizeof entry->name - 1] = '\0';
+    entry->constant_index = constant_index;
+    entry->function = function;
+    return true;
+}
+
+static bool ensure_function_specialization(Parser *parser, const Token *name_token, const char *base_name, const TemplateArgList *args, uint16_t *out_constant_index, ProtoFunction **out_function) {
+    if (!parser || !name_token || !base_name || !args || !out_constant_index) {
+        return false;
+    }
+
+    if (out_function) {
+        *out_function = NULL;
+    }
+
+    FunctionTemplateEntry *template_entry = find_function_template(parser, base_name);
+    if (!template_entry) {
+        char message[256];
+        snprintf(message, sizeof message, "'%s' is not a generic craft", base_name);
+        error(parser, message);
+        return false;
+    }
+
+    if (template_entry->type_param_count != args->count) {
+        char message[256];
+        snprintf(message, sizeof message, "Craft '%s' expects %u type argument(s)", base_name, template_entry->type_param_count);
+        error(parser, message);
+        return false;
+    }
+
+    TemplateArgList resolved_args = *args;
+    ProtoTypeBindingSet binding_set;
+    uint8_t arg_count = args->count;
+    if (arg_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        arg_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    binding_set.count = arg_count;
+    for (uint8_t i = 0; i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        binding_set.entries[i].tag = PROTO_TYPE_ANY;
+        binding_set.entries[i].param = -1;
+    }
+
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        ProtoTypeBinding binding = resolve_template_argument_binding(&args->args[i]);
+        binding_set.entries[i] = binding;
+
+        ProtoTypeTag effective_tag = binding.tag;
+        if (effective_tag == PROTO_TYPE_ANY) {
+            effective_tag = args->args[i].tag;
+        }
+        resolved_args.args[i].tag = effective_tag;
+        if (effective_tag != PROTO_TYPE_ANY) {
+            const char *label = proto_type_tag_name(effective_tag);
+            if (label) {
+                strncpy(resolved_args.args[i].label, label, sizeof resolved_args.args[i].label - 1);
+                resolved_args.args[i].label[sizeof resolved_args.args[i].label - 1] = '\0';
+            }
+        }
+    }
+
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        const ProtoTypeBinding *binding = &binding_set.entries[i];
+        const TemplateArg *original_arg = &args->args[i];
+        bool unresolved_identifier = original_arg->unresolved;
+        bool missing_binding = (!unresolved_identifier && binding->tag == PROTO_TYPE_ANY && binding->param < 0);
+        if (unresolved_identifier || missing_binding) {
+            char message[256];
+            const char *label = original_arg->label[0] != '\0' ? original_arg->label : proto_type_tag_name(original_arg->tag);
+            if (!label) {
+                label = "unknown";
+            }
+            if (unresolved_identifier) {
+                snprintf(message, sizeof message, "Unknown type argument '%s' supplied to craft '%s'", label, base_name);
+            } else {
+                const char *param_name = NULL;
+                if (template_entry->function && i < template_entry->function->type_param_count) {
+                    param_name = template_entry->function->type_params[i];
+                }
+                if (param_name && param_name[0] != '\0') {
+                    snprintf(message, sizeof message, "Unable to resolve binding for type parameter '%s' when instantiating craft '%s'", param_name, base_name);
+                } else {
+                    snprintf(message, sizeof message, "Unable to resolve type argument %u when instantiating craft '%s'", (unsigned)(i + 1), base_name);
+                }
+            }
+            Token saved_previous = parser->previous;
+            parser->previous = *name_token;
+            error(parser, message);
+            parser->previous = saved_previous;
+            return false;
+        }
+    }
+
+    const char *label_ptrs[PROTOHACK_MAX_TYPE_PARAMS] = {0};
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        label_ptrs[i] = resolved_args.args[i].label[0] != '\0' ? resolved_args.args[i].label : NULL;
+    }
+
+    char formatted[PROTOHACK_MAX_TEMPLATE_NAME];
+    if (!proto_function_format_specialization_name(base_name,
+                                                   template_entry->function,
+                                                   &binding_set,
+                                                   label_ptrs,
+                                                   arg_count,
+                                                   formatted,
+                                                   sizeof formatted)) {
+        error(parser, "Failed to format generic specialization name");
+        return false;
+    }
+
+    FunctionSpecializationEntry *existing = find_function_specialization(parser, formatted);
+    if (existing) {
+        *out_constant_index = existing->constant_index;
+        if (out_function) {
+            *out_function = existing->function;
+        }
+        return true;
+    }
+
+    ProtoFunction *instance = proto_function_copy(template_entry->function);
+    if (!instance) {
+        error(parser, "Failed to instantiate generic craft");
+        return false;
+    }
+    instance->template_origin = template_entry->function;
+    if (!proto_function_set_name(instance, formatted)) {
+        proto_function_free(instance);
+        error(parser, "Failed to assign specialization name");
+        return false;
+    }
+
+    ProtoTypeTag argument_tags[PROTOHACK_MAX_TYPE_PARAMS];
+    for (uint8_t i = 0; i < arg_count; ++i) {
+        ProtoTypeTag tag = binding_set.entries[i].tag;
+        if (tag == PROTO_TYPE_ANY) {
+            tag = resolved_args.args[i].tag;
+        }
+        argument_tags[i] = tag;
+    }
+    if (!proto_function_set_type_arguments(instance, argument_tags, arg_count)) {
+        proto_function_free(instance);
+        error(parser, "Failed to record specialization type arguments");
+        return false;
+    }
+
+    instance->bindings = binding_set;
+
+    for (uint8_t i = 0; i < instance->arity && i < PROTOHACK_MAX_PARAMS; ++i) {
+        int8_t binding = instance->param_type_params[i];
+        if (binding >= 0 && binding < (int8_t)arg_count) {
+            instance->param_types[i] = argument_tags[binding];
+        }
+    }
+    if (instance->return_type_param >= 0 && instance->return_type_param < (int8_t)arg_count) {
+        instance->return_type = argument_tags[instance->return_type_param];
+    }
+
+    Token saved_previous = parser->previous;
+    parser->previous = *name_token;
+    uint16_t index = make_constant(parser, proto_value_function(instance));
+    parser->previous = saved_previous;
+
+    if (!add_function_specialization(parser, formatted, index, instance)) {
+        error(parser, "Too many generic specializations in module");
+        return false;
+    }
+
+    if (out_function) {
+        *out_function = instance;
+    }
+
+    *out_constant_index = index;
+    return true;
+}
+
+static void emit_constant_index(Parser *parser, uint16_t index, size_t line) {
+    protochunk_write(current_chunk(parser), PROTO_OP_CONSTANT, line);
+    protochunk_write_u16(current_chunk(parser), index, line);
 }
 
 static int declare_global(Parser *parser, Token name, bool is_const) {
@@ -1351,21 +2520,110 @@ static void finish_native_call(Parser *parser, const Token *name_token) {
 }
 
 static void compile_named_call(Parser *parser, Token name, int local_slot, bool paren_consumed) {
+    ProtoFunction *target_function = NULL;
+    ProtoTypeTag return_type = PROTO_TYPE_ANY;
+
     if (local_slot >= 0) {
         emit_get_local(parser, (uint8_t)local_slot, name.line);
+        CompilerContext *context = current_context(parser);
+        if (context && local_slot < context->local_count && local_slot >= 0) {
+            Local *local = &context->locals[local_slot];
+            if (local->function_value) {
+                target_function = local->function_value;
+                return_type = target_function->return_type;
+            }
+        }
     } else {
         int global_index = resolve_global(parser, name);
         if (global_index < 0) {
             return;
         }
         emit_get_global(parser, &name, (uint16_t)global_index);
+        if (global_index >= 0 && global_index < PROTOHACK_MAX_GLOBALS) {
+            target_function = parser->globals.functions[global_index];
+            if (target_function) {
+                return_type = target_function->return_type;
+            }
+        }
     }
     if (!paren_consumed) {
         parser_advance(parser);
     }
     uint8_t arg_count = parse_call_arguments(parser);
+    if (target_function) {
+        validate_call_arguments(parser, &name, target_function, arg_count);
+    }
     emit_byte(parser, PROTO_OP_CALL);
     emit_byte(parser, arg_count);
+    parser_set_expression(parser, return_type, NULL);
+}
+
+static void validate_call_arguments(Parser *parser, const Token *name_token, const ProtoFunction *function, uint8_t provided_count) {
+    if (!parser || !function) {
+        return;
+    }
+
+    uint8_t expected = function->arity;
+    if (provided_count != expected) {
+        char message[256];
+        if (name_token && name_token->length > 0) {
+            snprintf(message,
+                     sizeof message,
+                     "'%.*s' expects %u argument%s but received %u",
+                     (int)name_token->length,
+                     name_token->start,
+                     expected,
+                     expected == 1 ? "" : "s",
+                     provided_count);
+        } else {
+            snprintf(message,
+                     sizeof message,
+                     "Function expects %u argument%s but received %u",
+                     expected,
+                     expected == 1 ? "" : "s",
+                     provided_count);
+        }
+        error(parser, message);
+        return;
+    }
+
+    uint8_t check_count = parser->argument_count;
+    if (check_count > expected) {
+        check_count = expected;
+    }
+
+    for (uint8_t i = 0; i < check_count; ++i) {
+        ProtoTypeTag expected_tag = function->param_types[i];
+        ProtoTypeTag actual_tag = parser->argument_types[i];
+        if (expected_tag == PROTO_TYPE_ANY || actual_tag == PROTO_TYPE_ANY) {
+            continue;
+        }
+        if (expected_tag == actual_tag) {
+            continue;
+        }
+        const char *expected_name = proto_type_tag_name(expected_tag);
+        const char *actual_name = proto_type_tag_name(actual_tag);
+        char message[256];
+        if (name_token && name_token->length > 0) {
+            snprintf(message,
+                     sizeof message,
+                     "Argument %u of '%.*s' expects %s but received %s",
+                     (unsigned)(i + 1),
+                     (int)name_token->length,
+                     name_token->start,
+                     expected_name,
+                     actual_name);
+        } else {
+            snprintf(message,
+                     sizeof message,
+                     "Argument %u expects %s but received %s",
+                     (unsigned)(i + 1),
+                     expected_name,
+                     actual_name);
+        }
+        error(parser, message);
+        return;
+    }
 }
 
 static void parse_call_keyword(Parser *parser, bool can_assign) {
@@ -1442,6 +2700,39 @@ static void parse_dot(Parser *parser, bool can_assign) {
     }
 }
 
+static void parse_address(Parser *parser, bool can_assign) {
+    (void)can_assign;
+    consume(parser, TOKEN_IDENTIFIER, "Expect identifier after '&'");
+    Token name = parser->previous;
+    CompilerContext *context = current_context(parser);
+    int local_slot = context ? resolve_local(parser, name) : -1;
+    if (local_slot >= 0) {
+        bool is_const = context->locals[local_slot].is_const;
+        emit_address_of_local(parser, (uint8_t)local_slot, is_const, name.line);
+        parser_set_expression(parser, PROTO_TYPE_PTR, NULL);
+        return;
+    }
+
+    int global_index = resolve_global(parser, name);
+    if (global_index < 0) {
+        return;
+    }
+    bool is_const = parser->globals.is_const[global_index];
+    emit_address_of_global(parser, (uint16_t)global_index, is_const, name.line);
+    parser_set_expression(parser, PROTO_TYPE_PTR, NULL);
+}
+
+static void parse_pointer_deref(Parser *parser, bool can_assign) {
+    Token star = parser->previous;
+    parse_precedence(parser, PREC_UNARY);
+    if (can_assign && match(parser, TOKEN_EQUAL)) {
+        parse_expression(parser);
+        protochunk_write(current_chunk(parser), PROTO_OP_PTR_STORE, star.line);
+    } else {
+        protochunk_write(current_chunk(parser), PROTO_OP_PTR_LOAD, star.line);
+    }
+}
+
 static void parse_grouping(Parser *parser, bool can_assign) {
     (void)can_assign;
     parse_expression(parser);
@@ -1456,9 +2747,13 @@ static void parse_unary(Parser *parser, bool can_assign) {
     switch (operator_type) {
         case TOKEN_BANG:
             emit_byte(parser, PROTO_OP_NOT);
+            parser_set_expression(parser, PROTO_TYPE_FLAG, NULL);
             break;
         case TOKEN_MINUS:
             emit_byte(parser, PROTO_OP_NEGATE);
+            if (parser->expression_type != PROTO_TYPE_ANY) {
+                parser_set_expression(parser, PROTO_TYPE_NUM, NULL);
+            }
             break;
         default:
             return;
@@ -1509,6 +2804,25 @@ static void parse_binary(Parser *parser, bool can_assign) {
         default:
             break;
     }
+
+    switch (operator_type) {
+        case TOKEN_PLUS:
+        case TOKEN_MINUS:
+        case TOKEN_STAR:
+        case TOKEN_SLASH:
+            parser_set_expression(parser, PROTO_TYPE_NUM, NULL);
+            break;
+        case TOKEN_EQUAL_EQUAL:
+        case TOKEN_BANG_EQUAL:
+        case TOKEN_GREATER:
+        case TOKEN_GREATER_EQUAL:
+        case TOKEN_LESS:
+        case TOKEN_LESS_EQUAL:
+            parser_set_expression(parser, PROTO_TYPE_FLAG, NULL);
+            break;
+        default:
+            break;
+    }
 }
 
 static void parse_literal(Parser *parser, bool can_assign) {
@@ -1516,12 +2830,15 @@ static void parse_literal(Parser *parser, bool can_assign) {
     switch (parser->previous.type) {
         case TOKEN_TRUE:
             emit_byte(parser, PROTO_OP_TRUE);
+            parser_set_expression(parser, PROTO_TYPE_FLAG, NULL);
             break;
         case TOKEN_FALSE:
             emit_byte(parser, PROTO_OP_FALSE);
+            parser_set_expression(parser, PROTO_TYPE_FLAG, NULL);
             break;
         case TOKEN_NULL:
             emit_byte(parser, PROTO_OP_NULL);
+            parser_set_expression(parser, PROTO_TYPE_NONE, NULL);
             break;
         default:
             error(parser, "Unknown literal");
@@ -1541,6 +2858,7 @@ static void parse_number(Parser *parser, bool can_assign) {
     buffer[length] = '\0';
     double value = strtod(buffer, NULL);
     emit_number_literal(parser, value);
+    parser_set_expression(parser, PROTO_TYPE_NUM, NULL);
 }
 
 static void parse_string(Parser *parser, bool can_assign) {
@@ -1553,6 +2871,7 @@ static void parse_string(Parser *parser, bool can_assign) {
     const char *start = parser->previous.start + 1;
     size_t actual_length = length - 2;
     emit_constant(parser, proto_value_string(start, actual_length));
+    parser_set_expression(parser, PROTO_TYPE_TEXT, NULL);
 }
 
 static void parse_and(Parser *parser, bool can_assign) {
@@ -1588,6 +2907,9 @@ static void parse_variable(Parser *parser, bool can_assign) {
                 return;
             }
             parse_expression(parser);
+            if (local) {
+                local->function_value = parser->recent_function_value;
+            }
             emit_set_local(parser, (uint8_t)local_slot, name.line);
             return;
         }
@@ -1600,7 +2922,43 @@ static void parse_variable(Parser *parser, bool can_assign) {
             return;
         }
         parse_expression(parser);
+        parser->globals.functions[global_index] = parser->recent_function_value;
         emit_set_global(parser, &name, (uint16_t)global_index);
+        return;
+    }
+
+    TemplateArgList template_args = {0};
+    bool has_template = try_parse_template_arguments(parser, &template_args);
+    if (has_template) {
+        if (local_slot >= 0) {
+            error(parser, "Generic specialization cannot target local identifiers");
+            return;
+        }
+        char identifier[PROTOHACK_MAX_IDENTIFIER + 1];
+        if (!token_to_identifier(&name, identifier, sizeof identifier)) {
+            error(parser, "Identifier is too long");
+            return;
+        }
+        uint16_t constant_index = 0;
+        ProtoFunction *specialized_function = NULL;
+        if (!ensure_function_specialization(parser, &name, identifier, &template_args, &constant_index, &specialized_function)) {
+            return;
+        }
+        emit_constant_index(parser, constant_index, name.line);
+        parser_set_expression(parser, PROTO_TYPE_ANY, specialized_function);
+        if (parser->current.type == TOKEN_LEFT_PAREN) {
+            parser_advance(parser);
+            uint8_t arg_count = parse_call_arguments(parser);
+            if (specialized_function) {
+                validate_call_arguments(parser, &name, specialized_function, arg_count);
+                parser_set_expression(parser, specialized_function->return_type, NULL);
+            } else {
+                parser_reset_expression(parser);
+            }
+            emit_byte(parser, PROTO_OP_CALL);
+            emit_byte(parser, arg_count);
+            parser->recent_function_value = NULL;
+        }
         return;
     }
 
@@ -1624,6 +2982,9 @@ static void parse_variable(Parser *parser, bool can_assign) {
 
     if (local_slot >= 0) {
         emit_get_local(parser, (uint8_t)local_slot, name.line);
+        ProtoTypeTag local_type = local ? local->type_tag : PROTO_TYPE_ANY;
+        ProtoFunction *local_function = local ? local->function_value : NULL;
+        parser_set_expression(parser, local_type, local_function);
         return;
     }
 
@@ -1632,6 +2993,9 @@ static void parse_variable(Parser *parser, bool can_assign) {
         return;
     }
     emit_get_global(parser, &name, (uint16_t)index);
+    ProtoTypeTag global_type = parser->globals.type_tags[index];
+    ProtoFunction *global_function = parser->globals.functions[index];
+    parser_set_expression(parser, global_type, global_function);
 }
 
 static ParseRule rules[] = {
@@ -1641,11 +3005,12 @@ static ParseRule rules[] = {
     [TOKEN_RIGHT_BRACE] = {NULL, NULL, PREC_NONE},
     [TOKEN_COMMA] = {NULL, NULL, PREC_NONE},
     [TOKEN_DOT] = {NULL, parse_dot, PREC_PRIMARY},
+    [TOKEN_AMPERSAND] = {parse_address, NULL, PREC_UNARY},
     [TOKEN_MINUS] = {parse_unary, parse_binary, PREC_TERM},
     [TOKEN_PLUS] = {NULL, parse_binary, PREC_TERM},
     [TOKEN_SEMICOLON] = {NULL, NULL, PREC_NONE},
     [TOKEN_SLASH] = {NULL, parse_binary, PREC_FACTOR},
-    [TOKEN_STAR] = {NULL, parse_binary, PREC_FACTOR},
+    [TOKEN_STAR] = {parse_pointer_deref, parse_binary, PREC_FACTOR},
     [TOKEN_BANG] = {parse_unary, NULL, PREC_NONE},
     [TOKEN_BANG_EQUAL] = {NULL, parse_binary, PREC_EQUALITY},
     [TOKEN_EQUAL] = {NULL, NULL, PREC_NONE},
@@ -1666,9 +3031,11 @@ static ParseRule rules[] = {
     [TOKEN_LET] = {NULL, NULL, PREC_NONE},
     [TOKEN_NULL] = {parse_literal, NULL, PREC_NONE},
     [TOKEN_PRINT] = {NULL, NULL, PREC_NONE},
+    [TOKEN_EXTEND] = {NULL, NULL, PREC_NONE},
     [TOKEN_TRUE] = {parse_literal, NULL, PREC_NONE},
     [TOKEN_THIS] = {parse_this, NULL, PREC_NONE},
     [TOKEN_WHILE] = {NULL, NULL, PREC_NONE},
+    [TOKEN_WITH] = {NULL, NULL, PREC_NONE},
     [TOKEN_CONST] = {NULL, NULL, PREC_NONE},
     [TOKEN_CALL] = {parse_call_keyword, NULL, PREC_NONE},
     [TOKEN_CARVE] = {parse_carve, NULL, PREC_NONE},
@@ -1706,6 +3073,7 @@ static void parse_precedence(Parser *parser, Precedence precedence) {
 }
 
 static void parse_expression(Parser *parser) {
+    parser_reset_expression(parser);
     parse_precedence(parser, PREC_ASSIGNMENT);
 }
 
@@ -1723,6 +3091,9 @@ static void synchronize(Parser *parser) {
             case TOKEN_IF:
             case TOKEN_WHILE:
             case TOKEN_FOR:
+            case TOKEN_CLASS:
+            case TOKEN_CRAFT:
+            case TOKEN_EXTEND:
                 return;
             default:
                 break;
@@ -1951,16 +3322,33 @@ static void method_declaration(Parser *parser, Token class_name) {
     ProtoFunctionKind kind = is_initializer ? PROTO_FUNC_INITIALIZER : PROTO_FUNC_METHOD;
     ProtoFunction *function = proto_function_new(kind, identifier);
 
+    const char *type_param_names[PROTOHACK_MAX_TYPE_PARAMS] = {0};
+    uint8_t class_type_param_count = 0;
+    if (parser->current_class) {
+        class_type_param_count = parser->current_class->type_param_count;
+        for (uint8_t i = 0; i < class_type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            type_param_names[i] = parser->current_class->type_param_names[i];
+        }
+    }
+    if (!proto_function_set_type_params(function, type_param_names, class_type_param_count)) {
+        error(parser, "Failed to record type parameters for method");
+    }
+
     CompilerContext context = {0};
     context.function = function;
     context.chunk = &function->chunk;
     context.local_count = 0;
     context.scope_depth = 0;
     context.expected_return = PROTO_TYPE_NONE;
+    context.type_param_count = class_type_param_count;
+    for (uint8_t i = 0; i < class_type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        context.type_params[i] = parser->current_class->type_params[i];
+    }
     context.enclosing = parser->compiler;
+    compiler_context_reset_bindings(&context);
 
     Token synthetic = {.type = TOKEN_THIS, .start = "this", .length = 4, .line = method_name.line};
-    context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY};
+    context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY, NULL};
 
     CompilerContext *previous = parser->compiler;
     parser->compiler = &context;
@@ -1974,11 +3362,13 @@ static void method_declaration(Parser *parser, Token class_name) {
             consume(parser, TOKEN_IDENTIFIER, "Expect parameter name");
             Token param_name = parser->previous;
             ProtoTypeTag param_type = PROTO_TYPE_ANY;
+            int8_t param_binding = -1;
             if (match(parser, TOKEN_AS)) {
-                param_type = parse_type_tag(parser);
+                param_type = parse_type_annotation(parser, &param_binding);
             }
             if (function->arity < PROTOHACK_MAX_PARAMS) {
                 function->param_types[function->arity] = param_type;
+                function->param_type_params[function->arity] = param_binding;
                 function->arity++;
             }
             add_local(parser, param_name, false, param_type);
@@ -1991,14 +3381,16 @@ static void method_declaration(Parser *parser, Token class_name) {
     consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after parameters");
 
     ProtoTypeTag return_type = PROTO_TYPE_NONE;
+    int8_t return_binding = -1;
     if (match(parser, TOKEN_GIVES)) {
-        return_type = parse_type_tag(parser);
+        return_type = parse_type_annotation(parser, &return_binding);
     }
     if (kind == PROTO_FUNC_INITIALIZER && return_type != PROTO_TYPE_NONE) {
         error(parser, "Initializers cannot declare return types");
         return_type = PROTO_TYPE_NONE;
     }
     function->return_type = return_type;
+    function->return_type_param = return_binding;
     context.expected_return = return_type;
 
     parse_function_body(parser, function);
@@ -2037,6 +3429,9 @@ static void class_declaration(Parser *parser) {
         return;
     }
 
+    TypeParameterList type_params = {0};
+    parse_type_parameter_list(parser, identifier, &type_params);
+
     int global_index = declare_global(parser, class_name, true);
     if (global_index < 0) {
         return;
@@ -2056,6 +3451,12 @@ static void class_declaration(Parser *parser) {
 
     ClassCompiler class_compiler = {0};
     class_compiler.name = class_name;
+    class_compiler.type_param_count = type_params.count;
+    for (uint8_t i = 0; i < type_params.count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        class_compiler.type_params[i] = type_params.tokens[i];
+        memcpy(class_compiler.type_param_names[i], type_params.names[i], sizeof class_compiler.type_param_names[i]);
+    }
+    class_compiler_reset_bindings(&class_compiler);
     class_compiler.enclosing = parser->current_class;
     parser->current_class = &class_compiler;
 
@@ -2069,6 +3470,395 @@ static void class_declaration(Parser *parser) {
 
     parser->current_class = class_compiler.enclosing;
 }
+
+static void extend_declaration(Parser *parser) {
+    if (!parser) {
+        return;
+    }
+
+    Token keyword = parser->previous;
+    if (match(parser, TOKEN_CRAFT)) {
+        extend_craft(parser, keyword);
+        return;
+    }
+
+    if (match(parser, TOKEN_CLASS)) {
+        error(parser, "Class extensions are not implemented yet");
+    } else {
+        error(parser, "Expect 'craft' or 'class' after 'extend'");
+    }
+
+    if (match(parser, TOKEN_LEFT_BRACE)) {
+        int depth = 1;
+        while (depth > 0 && !check(parser, TOKEN_EOF)) {
+            if (match(parser, TOKEN_LEFT_BRACE)) {
+                depth++;
+            } else if (match(parser, TOKEN_RIGHT_BRACE)) {
+                depth--;
+            } else {
+                parser_advance(parser);
+            }
+        }
+    }
+}
+
+static void extend_craft(Parser *parser, Token keyword) {
+    ProtoExtensionDecl decl;
+    memset(&decl, 0, sizeof decl);
+    decl.target_kind = PROTO_EXTENSION_TARGET_CRAFT;
+    decl.line = keyword.line;
+
+    bool header_ok = true;
+
+    consume(parser, TOKEN_IDENTIFIER, "Expect target name after 'extend craft'");
+    Token target_token = parser->previous;
+    char target_name[PROTOHACK_MAX_IDENTIFIER + 1] = {0};
+    if (!token_to_identifier(&target_token, target_name, sizeof target_name)) {
+        error(parser, "Identifier is too long");
+        header_ok = false;
+        strncpy(target_name, "<invalid>", sizeof target_name - 1);
+        target_name[sizeof target_name - 1] = '\0';
+    }
+
+    TemplateArgList target_args = {0};
+    if (!try_parse_template_arguments(parser, &target_args)) {
+        target_args.count = 0;
+    }
+
+    if (header_ok) {
+        if (!populate_extension_spec(parser, &target_token, target_name, &target_args, &decl.target)) {
+            header_ok = false;
+        }
+    } else {
+        extension_spec_reset(&decl.target);
+        strncpy(decl.target.name, target_name, sizeof decl.target.name - 1);
+        decl.target.name[sizeof decl.target.name - 1] = '\0';
+    }
+
+    if (match(parser, TOKEN_WITH)) {
+        while (!parser->had_error) {
+            if (check(parser, TOKEN_LEFT_PAREN) || check(parser, TOKEN_EOF)) {
+                error_at_current(parser, "Expect trait name after 'with'");
+                break;
+            }
+            consume(parser, TOKEN_IDENTIFIER, "Expect trait name after 'with'");
+            Token trait_token = parser->previous;
+            char trait_name[PROTOHACK_MAX_IDENTIFIER + 1] = {0};
+            bool trait_ok = token_to_identifier(&trait_token, trait_name, sizeof trait_name);
+            if (!trait_ok) {
+                error(parser, "Identifier is too long");
+                strncpy(trait_name, "<invalid>", sizeof trait_name - 1);
+                trait_name[sizeof trait_name - 1] = '\0';
+            }
+
+            TemplateArgList trait_args = {0};
+            if (!try_parse_template_arguments(parser, &trait_args)) {
+                trait_args.count = 0;
+            }
+
+            if (decl.trait_count >= PROTOHACK_MAX_EXTENSION_TRAITS) {
+                error(parser, "Too many trait clauses in extension");
+                trait_ok = false;
+            }
+
+            if (trait_ok) {
+                ProtoExtensionTypeSpec trait_spec;
+                extension_spec_reset(&trait_spec);
+                if (!populate_extension_spec(parser, &trait_token, trait_name, &trait_args, &trait_spec)) {
+                    trait_ok = false;
+                }
+                if (trait_ok && decl.trait_count < PROTOHACK_MAX_EXTENSION_TRAITS) {
+                    decl.traits[decl.trait_count++] = trait_spec;
+                }
+            }
+
+            if (!match(parser, TOKEN_COMMA)) {
+                break;
+            }
+        }
+    }
+
+    if (header_ok) {
+        header_ok = validate_extension_contract(parser, &target_token, &decl);
+    }
+
+    const ProtoFunction *template_function = NULL;
+    if (header_ok) {
+        template_function = resolve_extension_craft_template(parser, &decl);
+        if (!template_function) {
+            error(parser, "Craft extension target must be declared before 'extend'");
+            header_ok = false;
+        }
+    }
+
+    const ProtoTypeBindingSet *binding_set = &decl.target.bindings;
+    char specialization_name[PROTOHACK_MAX_TEMPLATE_NAME] = {0};
+    if (header_ok) {
+        const char *label_ptrs[PROTOHACK_MAX_TYPE_PARAMS] = {0};
+        for (uint8_t i = 0; i < decl.target.label_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            label_ptrs[i] = decl.target.labels[i][0] != '\0' ? decl.target.labels[i] : NULL;
+        }
+        if (!proto_function_format_specialization_name(decl.target.name,
+                                                       template_function,
+                                                       binding_set,
+                                                       label_ptrs,
+                                                       decl.target.label_count,
+                                                       specialization_name,
+                                                       sizeof specialization_name)) {
+            error(parser, "Failed to format craft specialization name");
+            header_ok = false;
+        }
+    }
+
+    uint8_t template_arity = 0;
+    ProtoTypeTag expected_param_types[PROTOHACK_MAX_PARAMS] = {0};
+    ProtoTypeTag expected_return_type = PROTO_TYPE_NONE;
+    if (header_ok) {
+        template_arity = template_function->arity;
+        for (uint8_t i = 0; i < template_arity && i < PROTOHACK_MAX_PARAMS; ++i) {
+            expected_param_types[i] = resolve_extension_specialized_type(template_function,
+                                                                         binding_set,
+                                                                         template_function->param_types[i],
+                                                                         template_function->param_type_params[i]);
+        }
+        expected_return_type = resolve_extension_specialized_type(template_function,
+                                                                  binding_set,
+                                                                  template_function->return_type,
+                                                                  template_function->return_type_param);
+    }
+
+    ProtoTypeTag type_arguments[PROTOHACK_MAX_TYPE_PARAMS] = {PROTO_TYPE_ANY};
+    uint8_t type_argument_count = binding_set ? binding_set->count : 0;
+    if (type_argument_count > PROTOHACK_MAX_TYPE_PARAMS) {
+        type_argument_count = PROTOHACK_MAX_TYPE_PARAMS;
+    }
+    for (uint8_t i = 0; i < type_argument_count; ++i) {
+        ProtoTypeBinding binding = binding_set->entries[i];
+        type_arguments[i] = (binding.tag != PROTO_TYPE_ANY && binding.param < 0) ? binding.tag : PROTO_TYPE_ANY;
+    }
+
+    ProtoFunction *function = NULL;
+    if (header_ok) {
+        function = proto_function_new(PROTO_FUNC_CRAFT, specialization_name);
+        const char *type_param_names[PROTOHACK_MAX_TYPE_PARAMS] = {0};
+        for (uint8_t i = 0; i < template_function->type_param_count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+            type_param_names[i] = template_function->type_params[i];
+        }
+        if (!proto_function_set_type_params(function, type_param_names, template_function->type_param_count)) {
+            error(parser, "Failed to record type parameters for craft extension");
+            header_ok = false;
+        }
+        if (header_ok) {
+            if (!proto_function_set_type_arguments(function, type_arguments, type_argument_count)) {
+                error(parser, "Failed to record specialization type arguments");
+                header_ok = false;
+            }
+        }
+        function->template_origin = template_function;
+        function->bindings = *binding_set;
+        function->return_type_param = template_function->return_type_param;
+        memcpy(function->param_type_params, template_function->param_type_params, sizeof function->param_type_params);
+    }
+
+    CompilerContext context = {0};
+    CompilerContext *previous = parser->compiler;
+    const char *body_start = NULL;
+    const char *body_end = NULL;
+
+    if (header_ok && function) {
+        context.function = function;
+        context.chunk = &function->chunk;
+        context.local_count = 0;
+        context.scope_depth = 0;
+        context.expected_return = expected_return_type;
+        context.type_param_count = 0;
+        context.enclosing = previous;
+        compiler_context_reset_bindings(&context);
+
+        Token synthetic = {.type = TOKEN_IDENTIFIER, .start = "", .length = 0, .line = keyword.line};
+        context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY, NULL};
+
+        parser->compiler = &context;
+
+        consume(parser, TOKEN_LEFT_PAREN, "Expect '(' after craft extension target");
+        uint8_t param_index = 0;
+        if (!check(parser, TOKEN_RIGHT_PAREN)) {
+            do {
+                if (param_index >= template_arity) {
+                    error(parser, "Craft extension declares too many parameters");
+                    header_ok = false;
+                }
+
+                consume(parser, TOKEN_IDENTIFIER, "Expect parameter name in craft extension");
+                Token param_name = parser->previous;
+
+                ProtoTypeTag declared_type = PROTO_TYPE_ANY;
+                if (match(parser, TOKEN_AS)) {
+                    declared_type = parse_type_annotation(parser, NULL);
+                }
+
+                ProtoTypeTag expected_type = PROTO_TYPE_ANY;
+                if (param_index < template_arity) {
+                    expected_type = expected_param_types[param_index];
+                }
+
+                if (declared_type != PROTO_TYPE_ANY && declared_type != expected_type) {
+                    const char *expected_name = proto_type_tag_name(expected_type);
+                    char message[160];
+                    snprintf(message,
+                             sizeof message,
+                             "Craft extension parameter %u must have type %s",
+                             (unsigned)(param_index + 1),
+                             expected_name ? expected_name : "any");
+                    error(parser, message);
+                    header_ok = false;
+                }
+
+                if (function->arity < PROTOHACK_MAX_PARAMS && param_index < template_arity) {
+                    function->param_types[param_index] = expected_type;
+                    function->param_type_params[param_index] = template_function->param_type_params[param_index];
+                }
+                if (param_index < PROTOHACK_MAX_PARAMS) {
+                    function->arity = (uint8_t)(param_index + 1);
+                }
+
+                add_local(parser, param_name, false, expected_type);
+                CompilerContext *ctx = current_context(parser);
+                if (ctx) {
+                    ctx->locals[ctx->local_count - 1].depth = 0;
+                }
+
+                param_index++;
+            } while (match(parser, TOKEN_COMMA));
+        }
+        consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after craft extension parameters");
+
+        if (header_ok && param_index != template_arity) {
+            error(parser, "Craft extension must declare the same number of parameters as the target craft");
+            header_ok = false;
+        }
+
+        if (match(parser, TOKEN_GIVES)) {
+            ProtoTypeTag declared_return = parse_type_annotation(parser, NULL);
+            if (declared_return != PROTO_TYPE_ANY && declared_return != expected_return_type) {
+                const char *expected_name = proto_type_tag_name(expected_return_type);
+                char message[160];
+                snprintf(message,
+                         sizeof message,
+                         "Craft extension must return %s",
+                         expected_name ? expected_name : "any");
+                error(parser, message);
+                header_ok = false;
+            }
+        }
+
+        function->return_type = expected_return_type;
+        context.expected_return = expected_return_type;
+
+        consume(parser, TOKEN_LEFT_BRACE, "Expect '{' to start craft extension body");
+        body_start = parser->current.start;
+        begin_scope(parser);
+        while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF)) {
+            declaration(parser);
+        }
+        body_end = parser->current.start;
+        consume(parser, TOKEN_RIGHT_BRACE, "Expect '}' after craft extension body");
+        end_scope(parser);
+
+        emit_return(parser);
+        sync_function_globals(parser, &function->chunk);
+
+        parser->compiler = previous;
+    } else {
+        if (!parser->had_error) {
+            // Attempt to consume body to recover from header failure.
+            if (match(parser, TOKEN_LEFT_PAREN)) {
+                int depth = 1;
+                while (depth > 0 && !check(parser, TOKEN_EOF)) {
+                    if (match(parser, TOKEN_LEFT_PAREN)) {
+                        depth++;
+                    } else if (match(parser, TOKEN_RIGHT_PAREN)) {
+                        depth--;
+                    } else {
+                        parser_advance(parser);
+                    }
+                }
+            }
+            if (match(parser, TOKEN_LEFT_BRACE)) {
+                int depth = 1;
+                while (depth > 0 && !check(parser, TOKEN_EOF)) {
+                    if (match(parser, TOKEN_LEFT_BRACE)) {
+                        depth++;
+                    } else if (match(parser, TOKEN_RIGHT_BRACE)) {
+                        depth--;
+                    } else {
+                        parser_advance(parser);
+                    }
+                }
+            }
+        }
+        parser->compiler = previous;
+    }
+
+    bool success = header_ok && !parser->had_error && function != NULL;
+    if (!success) {
+        if (function) {
+            proto_function_free(function);
+        }
+        for (uint8_t i = 0; i < decl.trait_count; ++i) {
+            (void)decl.traits[i];
+        }
+        return;
+    }
+
+    if (body_start && body_end && body_end >= body_start) {
+        size_t length = (size_t)(body_end - body_start);
+        decl.body_source = protohack_copy_string(body_start, length);
+        decl.body_length = length;
+    } else {
+        decl.body_source = protohack_copy_string("", 0);
+        decl.body_length = 0;
+    }
+
+    FunctionSpecializationEntry *existing = find_function_specialization(parser, specialization_name);
+    uint16_t constant_index = 0;
+    if (existing) {
+        constant_index = existing->constant_index;
+        if (constant_index < parser->chunk->constants_count) {
+            ProtoValue *slot = &parser->chunk->constants[constant_index];
+            proto_value_free(slot);
+            *slot = proto_value_function(function);
+        }
+        if (existing->function && existing->function != template_function) {
+            proto_function_free(existing->function);
+        }
+        existing->function = function;
+    } else {
+        Token saved_previous = parser->previous;
+        parser->previous = target_token;
+        constant_index = make_constant(parser, proto_value_function(function));
+        parser->previous = saved_previous;
+        if (!add_function_specialization(parser, specialization_name, constant_index, function)) {
+            error(parser, "Too many craft specializations in module");
+            return;
+        }
+    }
+
+    ProtoChunk *chunk = current_chunk(parser);
+    if (chunk) {
+        if (chunk->extension_count >= chunk->extension_capacity) {
+            size_t new_capacity = chunk->extension_capacity == 0 ? 4 : chunk->extension_capacity * 2;
+            ProtoExtensionDecl *new_entries = (ProtoExtensionDecl *)realloc(chunk->extensions, new_capacity * sizeof *chunk->extensions);
+            if (!new_entries) {
+                PROTOHACK_FATAL("Failed to allocate extension metadata");
+            }
+            chunk->extensions = new_entries;
+            chunk->extension_capacity = new_capacity;
+        }
+        chunk->extensions[chunk->extension_count++] = decl;
+    }
+}
+
 
 static void craft_declaration(Parser *parser) {
     CompilerContext *enclosing = current_context(parser);
@@ -2086,6 +3876,9 @@ static void craft_declaration(Parser *parser) {
         return;
     }
 
+    TypeParameterList type_params = {0};
+    parse_type_parameter_list(parser, identifier, &type_params);
+
     int global_index = declare_global(parser, name, true);
     if (global_index < 0) {
         return;
@@ -2095,16 +3888,35 @@ static void craft_declaration(Parser *parser) {
 
     ProtoFunction *function = proto_function_new(PROTO_FUNC_CRAFT, identifier);
 
+    const char *type_param_names[PROTOHACK_MAX_TYPE_PARAMS] = {0};
+    for (uint8_t i = 0; i < type_params.count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        type_param_names[i] = type_params.names[i];
+    }
+    if (!proto_function_set_type_params(function, type_param_names, type_params.count)) {
+        error(parser, "Failed to record type parameters for craft");
+    }
+
+    if (type_params.count > 0) {
+        if (!register_function_template(parser, identifier, function, type_params.count)) {
+            error(parser, "Unable to register generic craft");
+        }
+    }
+
     CompilerContext context = {0};
     context.function = function;
     context.chunk = &function->chunk;
     context.local_count = 0;
     context.scope_depth = 0;
     context.expected_return = PROTO_TYPE_NONE;
+    context.type_param_count = type_params.count;
+    for (uint8_t i = 0; i < type_params.count && i < PROTOHACK_MAX_TYPE_PARAMS; ++i) {
+        context.type_params[i] = type_params.tokens[i];
+    }
     context.enclosing = enclosing;
+    compiler_context_reset_bindings(&context);
 
     Token synthetic = {.type = TOKEN_IDENTIFIER, .start = "", .length = 0, .line = name.line};
-    context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY};
+    context.locals[context.local_count++] = (Local){synthetic, 0, true, PROTO_TYPE_ANY, NULL};
 
     CompilerContext *previous = parser->compiler;
     parser->compiler = &context;
@@ -2118,11 +3930,13 @@ static void craft_declaration(Parser *parser) {
             consume(parser, TOKEN_IDENTIFIER, "Expect parameter name");
             Token param_name = parser->previous;
             ProtoTypeTag param_type = PROTO_TYPE_ANY;
+            int8_t param_binding = -1;
             if (match(parser, TOKEN_AS)) {
-                param_type = parse_type_tag(parser);
+                param_type = parse_type_annotation(parser, &param_binding);
             }
             if (function->arity < PROTOHACK_MAX_PARAMS) {
                 function->param_types[function->arity] = param_type;
+                function->param_type_params[function->arity] = param_binding;
                 function->arity++;
             }
             add_local(parser, param_name, false, param_type);
@@ -2135,10 +3949,12 @@ static void craft_declaration(Parser *parser) {
     consume(parser, TOKEN_RIGHT_PAREN, "Expect ')' after parameters");
 
     ProtoTypeTag return_type = PROTO_TYPE_NONE;
+    int8_t return_binding = -1;
     if (match(parser, TOKEN_GIVES)) {
-        return_type = parse_type_tag(parser);
+        return_type = parse_type_annotation(parser, &return_binding);
     }
     function->return_type = return_type;
+    function->return_type_param = return_binding;
     context.expected_return = return_type;
 
     parse_function_body(parser, function);
@@ -2156,6 +3972,8 @@ static void craft_declaration(Parser *parser) {
     emit_set_global(parser, &name, (uint16_t)global_index);
     parser->globals.defined[global_index] = true;
     parser->globals.is_const[global_index] = true;
+    parser->globals.functions[global_index] = function;
+    parser->globals.type_tags[global_index] = PROTO_TYPE_ANY;
 
 }
 
@@ -2183,6 +4001,7 @@ static void let_declaration(Parser *parser, bool is_const) {
             consume(parser, TOKEN_SEMICOLON, "Expect ';' after declaration");
             return;
         }
+        parser->globals.type_tags[index] = type_tag;
     }
 
     bool has_initializer = match(parser, TOKEN_EQUAL);
@@ -2194,8 +4013,19 @@ static void let_declaration(Parser *parser, bool is_const) {
         if (!is_local) {
             parser->initializing_global = -1;
         }
+        if (is_local) {
+            CompilerContext *ctx = current_context(parser);
+            if (ctx && ctx->local_count > 0) {
+                ctx->locals[ctx->local_count - 1].function_value = parser->recent_function_value;
+            }
+        } else if (index >= 0) {
+            parser->globals.functions[index] = parser->recent_function_value;
+        }
     } else {
         emit_byte(parser, PROTO_OP_NULL);
+        if (!is_local && index >= 0) {
+            parser->globals.functions[index] = NULL;
+        }
     }
 
     consume(parser, TOKEN_SEMICOLON, "Expect ';' after declaration");
@@ -2220,12 +4050,63 @@ static void declaration(Parser *parser) {
         craft_declaration(parser);
     } else if (match(parser, TOKEN_CLASS)) {
         class_declaration(parser);
+    } else if (match(parser, TOKEN_EXTEND)) {
+        extend_declaration(parser);
     } else {
         statement(parser);
     }
 
     if (parser->panic_mode) {
         synchronize(parser);
+    }
+}
+
+static void finalize_module_metadata(Parser *parser) {
+    if (!parser || parser->had_error) {
+        return;
+    }
+
+    ProtoChunk *chunk = parser->chunk;
+    if (!chunk) {
+        return;
+    }
+
+    free(chunk->binding_entries);
+    chunk->binding_entries = NULL;
+    chunk->binding_entry_count = 0;
+    chunk->binding_entry_capacity = 0;
+
+    size_t global_limit = chunk->globals_count;
+    if (global_limit > PROTOHACK_MAX_GLOBALS) {
+        global_limit = PROTOHACK_MAX_GLOBALS;
+    }
+
+    for (size_t i = 0; i < global_limit; ++i) {
+        ProtoFunction *function = parser->globals.functions[i];
+        if (!function) {
+            continue;
+        }
+        if (function->bindings.count == 0) {
+            continue;
+        }
+        if (chunk->binding_entry_count >= chunk->binding_entry_capacity) {
+            size_t new_capacity = chunk->binding_entry_capacity == 0 ? 4 : chunk->binding_entry_capacity * 2;
+            ProtoBindingMapEntry *new_entries = (ProtoBindingMapEntry *)realloc(chunk->binding_entries, new_capacity * sizeof *new_entries);
+            if (!new_entries) {
+                PROTOHACK_FATAL("Failed to allocate generic binding map");
+            }
+            chunk->binding_entries = new_entries;
+            chunk->binding_entry_capacity = new_capacity;
+        }
+        ProtoBindingMapEntry *entry = &chunk->binding_entries[chunk->binding_entry_count++];
+        entry->symbol_index = (uint32_t)i;
+        entry->bindings = function->bindings;
+    }
+
+    if (chunk->binding_entry_count > 0) {
+        chunk->module_flags |= PROTOHACK_MODULE_FLAG_HAS_BINDING_MAP;
+    } else {
+        chunk->module_flags &= ~PROTOHACK_MODULE_FLAG_HAS_BINDING_MAP;
     }
 }
 
@@ -2253,6 +4134,8 @@ bool protohack_compile_source(const char *source, const char *origin_path, Proto
     }
     parser_advance(&parser);
     emit_return(&parser);
+
+    finalize_module_metadata(&parser);
 
     bool success = !parser.had_error;
     free(preprocessed);
