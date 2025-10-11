@@ -7,6 +7,35 @@ interface NativeFunction {
   readonly documentation: string;
 }
 
+interface MethodInfo {
+  readonly name: string;
+  readonly signature: string;
+  readonly location: vscode.Location;
+  readonly declaringClass: string;
+}
+
+interface ClassInfo {
+  readonly name: string;
+  readonly location: vscode.Location;
+  readonly methods: Map<string, MethodInfo>;
+}
+
+interface CraftInfo {
+  readonly name: string;
+  readonly parameters: string[];
+  readonly returnType?: string;
+  readonly signature: string;
+  readonly location: vscode.Location;
+}
+
+interface DocumentIntelligence {
+  readonly classes: Map<string, ClassInfo>;
+  readonly crafts: Map<string, CraftInfo>;
+  readonly variables: Map<string, vscode.Location>;
+  readonly classMethods: Map<string, Map<string, MethodInfo>>;
+  readonly variableTypes: Map<string, string>;
+}
+
 const KEYWORDS: string[] = [
   'let',
   'const',
@@ -169,83 +198,117 @@ const NATIVE_FUNCTIONS: NativeFunction[] = [
 
 const MEMORY_TYPES: string[] = ['numeric', 'flag', 'text', 'raw', 'any'];
 
-interface DocumentIntelligence {
-  readonly classNames: Set<string>;
-  readonly craftNames: Set<string>;
-  readonly variableNames: Set<string>;
-  readonly classMethods: Map<string, Set<string>>;
-  readonly variableTypes: Map<string, string>;
-}
-
 function analyzeDocument(document: vscode.TextDocument): DocumentIntelligence {
   const text = document.getText();
 
-  const classNames = new Set<string>();
-  const craftNames = new Set<string>();
-  const variableNames = new Set<string>();
-  const classMethods = new Map<string, Set<string>>();
+  const classes = new Map<string, ClassInfo>();
+  const crafts = new Map<string, CraftInfo>();
+  const variables = new Map<string, vscode.Location>();
+  const classMethods = new Map<string, Map<string, MethodInfo>>();
   const variableTypes = new Map<string, string>();
 
-  const classPattern = /class\s+([A-Za-z_][A-Za-z0-9_]*)[^\S\n]*\{/g;
+  const classPattern = /\bclass\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*<[^>{}]+>)?\s*\{/g;
   let classMatch: RegExpExecArray | null;
   while ((classMatch = classPattern.exec(text)) !== null) {
     const className = classMatch[1];
-    classNames.add(className);
+    const classNameStart = classMatch.index + classMatch[0].indexOf(className);
+    const classNameEnd = classNameStart + className.length;
+    const classLocation = new vscode.Location(
+      document.uri,
+      new vscode.Range(document.positionAt(classNameStart), document.positionAt(classNameEnd))
+    );
 
-    const openBraceIndex = text.indexOf('{', classMatch.index);
-    if (openBraceIndex === -1) {
-      continue;
-    }
+    const openBraceIndex = classMatch.index + classMatch[0].lastIndexOf('{');
     const block = extractBlock(text, openBraceIndex);
-    if (!block) {
-      continue;
+    const methods = new Map<string, MethodInfo>();
+
+    if (block) {
+      const methodPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/gm;
+      let methodMatch: RegExpExecArray | null;
+      while ((methodMatch = methodPattern.exec(block.body)) !== null) {
+        const methodName = methodMatch[1];
+        const methodParams = (methodMatch[2] ?? '').trim();
+        const methodSignature = `${methodName}(${methodParams})`;
+        const methodNameStart = block.bodyStart + methodMatch.index + methodMatch[0].indexOf(methodName);
+        const methodNameEnd = methodNameStart + methodName.length;
+        const methodLocation = new vscode.Location(
+          document.uri,
+          new vscode.Range(document.positionAt(methodNameStart), document.positionAt(methodNameEnd))
+        );
+        methods.set(methodName, {
+          name: methodName,
+          signature: methodSignature,
+          location: methodLocation,
+          declaringClass: className
+        });
+      }
+
+      classPattern.lastIndex = block.end;
     }
-    const methods = new Set<string>();
-    const methodPattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
-    let methodMatch: RegExpExecArray | null;
-    while ((methodMatch = methodPattern.exec(block.body)) !== null) {
-      methods.add(methodMatch[1]);
-    }
+
+    const classInfo: ClassInfo = { name: className, location: classLocation, methods };
+    classes.set(className, classInfo);
     if (methods.size > 0) {
       classMethods.set(className, methods);
     }
-    classPattern.lastIndex = block.end;
   }
 
-  const craftPattern = /\bcraft\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+  const craftPattern = /\bcraft\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:gives\s+([A-Za-z0-9_\[\]]+))?\s*\{/g;
   let craftMatch: RegExpExecArray | null;
   while ((craftMatch = craftPattern.exec(text)) !== null) {
-    craftNames.add(craftMatch[1]);
+    const craftName = craftMatch[1];
+    const paramsRaw = craftMatch[2] ?? '';
+    const returnType = craftMatch[3];
+    const nameStart = craftMatch.index + craftMatch[0].indexOf(craftName);
+    const nameEnd = nameStart + craftName.length;
+    const location = new vscode.Location(
+      document.uri,
+      new vscode.Range(document.positionAt(nameStart), document.positionAt(nameEnd))
+    );
+    const parameters = paramsRaw
+      .split(',')
+      .map(param => param.trim())
+      .filter(param => param.length > 0);
+    const signature = `${craftName}(${paramsRaw.trim()})${returnType ? ` gives ${returnType}` : ''}`;
+    crafts.set(craftName, { name: craftName, parameters, returnType, signature, location });
+    craftPattern.lastIndex = nameEnd;
   }
 
   const variablePattern = /\b(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
   let variableMatch: RegExpExecArray | null;
   while ((variableMatch = variablePattern.exec(text)) !== null) {
-    variableNames.add(variableMatch[1]);
+    const variableName = variableMatch[1];
+    const nameStart = variableMatch.index + variableMatch[0].indexOf(variableName);
+    const nameEnd = nameStart + variableName.length;
+    const location = new vscode.Location(
+      document.uri,
+      new vscode.Range(document.positionAt(nameStart), document.positionAt(nameEnd))
+    );
+    variables.set(variableName, location);
   }
 
-  if (classNames.size > 0) {
+  if (classes.size > 0) {
     const instancePattern = /\b(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
     let instanceMatch: RegExpExecArray | null;
     while ((instanceMatch = instancePattern.exec(text)) !== null) {
       const instanceName = instanceMatch[1];
       const constructorName = instanceMatch[2];
-      if (classNames.has(constructorName)) {
+      if (classes.has(constructorName)) {
         variableTypes.set(instanceName, constructorName);
       }
     }
   }
 
   return {
-    classNames,
-    craftNames,
-    variableNames,
+    classes,
+    crafts,
+    variables,
     classMethods,
     variableTypes
   };
 }
 
-function extractBlock(text: string, openBraceIndex: number): { body: string; end: number } | undefined {
+function extractBlock(text: string, openBraceIndex: number): { body: string; end: number; bodyStart: number } | undefined {
   let depth = 0;
   for (let i = openBraceIndex; i < text.length; i++) {
     const char = text[i];
@@ -254,8 +317,9 @@ function extractBlock(text: string, openBraceIndex: number): { body: string; end
     } else if (char === '}') {
       depth--;
       if (depth === 0) {
-        const body = text.slice(openBraceIndex + 1, i);
-        return { body, end: i + 1 };
+        const bodyStart = openBraceIndex + 1;
+        const body = text.slice(bodyStart, i);
+        return { body, end: i + 1, bodyStart };
       }
     }
   }
@@ -273,12 +337,108 @@ function findEnclosingClass(document: vscode.TextDocument, position: vscode.Posi
   return undefined;
 }
 
+class ProtohackWorkspaceIndex {
+  private readonly documents = new Map<string, DocumentIntelligence>();
+
+  async initialize(context: vscode.ExtensionContext): Promise<void> {
+    vscode.workspace.textDocuments.forEach(document => this.indexDocument(document));
+
+    context.subscriptions.push(
+      vscode.workspace.onDidOpenTextDocument(document => this.indexDocument(document)),
+      vscode.workspace.onDidCloseTextDocument(document => this.documents.delete(document.uri.toString())),
+      vscode.workspace.onDidChangeTextDocument(event => this.indexDocument(event.document))
+    );
+
+    try {
+      const files = await vscode.workspace.findFiles('**/*.{phk,phc}', '**/{node_modules,.git}/**');
+      await Promise.all(
+        files.map(async uri => {
+          const key = uri.toString();
+          if (this.documents.has(key)) {
+            return;
+          }
+          try {
+            const document = await vscode.workspace.openTextDocument(uri);
+            this.indexDocument(document);
+          } catch (error) {
+            // ignore unreadable files
+          }
+        })
+      );
+    } catch (error) {
+      // workspace may be untitled or restricted; ignore indexing failure
+    }
+  }
+
+  getDocumentIntelligence(document: vscode.TextDocument): DocumentIntelligence {
+    this.indexDocument(document);
+    const key = document.uri.toString();
+    return this.documents.get(key) ?? analyzeDocument(document);
+  }
+
+  getAggregateIntelligence(): DocumentIntelligence {
+    const classes = new Map<string, ClassInfo>();
+    const crafts = new Map<string, CraftInfo>();
+    const variables = new Map<string, vscode.Location>();
+    const classMethods = new Map<string, Map<string, MethodInfo>>();
+    const variableTypes = new Map<string, string>();
+
+    this.documents.forEach(intelligence => {
+      intelligence.classes.forEach((classInfo, className) => {
+        if (!classes.has(className)) {
+          classes.set(className, classInfo);
+        }
+        if (classInfo.methods.size > 0) {
+          const existing = classMethods.get(className) ?? new Map<string, MethodInfo>();
+          classInfo.methods.forEach((methodInfo, methodName) => {
+            if (!existing.has(methodName)) {
+              existing.set(methodName, methodInfo);
+            }
+          });
+          classMethods.set(className, existing);
+        }
+      });
+
+      intelligence.crafts.forEach((craftInfo, craftName) => {
+        if (!crafts.has(craftName)) {
+          crafts.set(craftName, craftInfo);
+        }
+      });
+
+      intelligence.variables.forEach((location, variableName) => {
+        if (!variables.has(variableName)) {
+          variables.set(variableName, location);
+        }
+      });
+
+      intelligence.variableTypes.forEach((value, variableName) => {
+        if (!variableTypes.has(variableName)) {
+          variableTypes.set(variableName, value);
+        }
+      });
+    });
+
+    return { classes, crafts, variables, classMethods, variableTypes };
+  }
+
+  private indexDocument(document: vscode.TextDocument): void {
+    if (document.languageId !== 'protohack') {
+      return;
+    }
+    const intelligence = analyzeDocument(document);
+    this.documents.set(document.uri.toString(), intelligence);
+  }
+}
+
 class ProtohackCompletionProvider implements vscode.CompletionItemProvider {
+  constructor(private readonly index: ProtohackWorkspaceIndex) {}
+
   provideCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position
   ): vscode.ProviderResult<vscode.CompletionItem[]> {
-    const intelligence = analyzeDocument(document);
+    const intelligence = this.index.getDocumentIntelligence(document);
+    const workspaceIntelligence = this.index.getAggregateIntelligence();
     const linePrefix = document.lineAt(position.line).text.slice(0, position.character);
     const memberMatch = /([A-Za-z_][A-Za-z0-9_]*)\.\w*$/.exec(linePrefix);
     if (memberMatch) {
@@ -288,19 +448,30 @@ class ProtohackCompletionProvider implements vscode.CompletionItemProvider {
         targetClass = findEnclosingClass(document, position);
       } else {
         targetClass = intelligence.variableTypes.get(receiver);
-        if (!targetClass && intelligence.classNames.has(receiver)) {
+        if (!targetClass && intelligence.classes.has(receiver)) {
+          targetClass = receiver;
+        }
+        if (!targetClass && workspaceIntelligence.classes.has(receiver)) {
           targetClass = receiver;
         }
       }
 
-      const methodNames = targetClass ? intelligence.classMethods.get(targetClass) : undefined;
-      if (methodNames && methodNames.size > 0) {
-        return Array.from(methodNames).map(method => {
-          const item = new vscode.CompletionItem(method, vscode.CompletionItemKind.Method);
-          item.insertText = method;
-          item.detail = `${targetClass} method`;
-          return item;
+      const methods = targetClass
+        ? intelligence.classMethods.get(targetClass) ?? workspaceIntelligence.classMethods.get(targetClass)
+        : undefined;
+      if (methods && methods.size > 0) {
+        const methodItems: vscode.CompletionItem[] = [];
+        methods.forEach((methodInfo, methodName) => {
+          const item = new vscode.CompletionItem(methodName, vscode.CompletionItemKind.Method);
+          item.insertText = methodName;
+          const relPath = vscode.workspace.asRelativePath(methodInfo.location.uri, true);
+          item.detail = `${targetClass} method (${relPath})`;
+          const markdown = new vscode.MarkdownString();
+          markdown.appendCodeblock(methodInfo.signature, 'protohack');
+          item.documentation = markdown;
+          methodItems.push(item);
         });
+        return methodItems;
       }
       return [];
     }
@@ -367,24 +538,74 @@ class ProtohackCompletionProvider implements vscode.CompletionItemProvider {
     classSnippet.documentation = new vscode.MarkdownString('Create a class with an initializer skeleton.');
     pushUnique(classSnippet);
 
-    intelligence.classNames.forEach(className => {
+    intelligence.classes.forEach((classInfo, className) => {
       const item = new vscode.CompletionItem(className, vscode.CompletionItemKind.Class);
       item.insertText = className;
       item.detail = 'Class declared in this file';
+      if (classInfo.methods.size > 0) {
+        const methodList = Array.from(classInfo.methods.values())
+          .map(method => `- \`${method.signature}\``)
+          .join('\n');
+        item.documentation = new vscode.MarkdownString(`### Methods\n${methodList}`);
+      }
       pushUnique(item);
     });
 
-    intelligence.craftNames.forEach(craftName => {
+    intelligence.crafts.forEach((craftInfo, craftName) => {
       const item = new vscode.CompletionItem(craftName, vscode.CompletionItemKind.Function);
       item.insertText = new vscode.SnippetString(`${craftName}($0)`);
       item.detail = 'Craft declared in this file';
+      const params = craftInfo.parameters.join(', ');
+      const markdown = new vscode.MarkdownString();
+      markdown.appendCodeblock(`craft ${craftName}(${params})${craftInfo.returnType ? ` gives ${craftInfo.returnType}` : ''}`, 'protohack');
+      item.documentation = markdown;
       pushUnique(item);
     });
 
-    intelligence.variableNames.forEach(variableName => {
+    intelligence.variables.forEach((location, variableName) => {
       const item = new vscode.CompletionItem(variableName, vscode.CompletionItemKind.Variable);
       item.insertText = variableName;
       item.detail = 'Variable declared in this file';
+      const variableType = intelligence.variableTypes.get(variableName);
+      if (variableType) {
+        item.documentation = new vscode.MarkdownString(`Inferred type: **${variableType}**`);
+      }
+      pushUnique(item);
+    });
+
+    workspaceIntelligence.classes.forEach((classInfo, className) => {
+      if (intelligence.classes.has(className)) {
+        return;
+      }
+      const item = new vscode.CompletionItem(className, vscode.CompletionItemKind.Class);
+      item.insertText = className;
+      const relPath = vscode.workspace.asRelativePath(classInfo.location.uri, true);
+      item.detail = `Class defined in ${relPath}`;
+      if (classInfo.methods.size > 0) {
+        const methodList = Array.from(classInfo.methods.values())
+          .map(method => `- \`${method.signature}\``)
+          .join('\n');
+        const markdown = new vscode.MarkdownString();
+        markdown.appendMarkdown(`**class ${className}** (_${relPath}_)\n\n`);
+        markdown.appendMarkdown(`### Methods\n${methodList}`);
+        item.documentation = markdown;
+      }
+      pushUnique(item);
+    });
+
+    workspaceIntelligence.crafts.forEach((craftInfo, craftName) => {
+      if (intelligence.crafts.has(craftName)) {
+        return;
+      }
+      const item = new vscode.CompletionItem(craftName, vscode.CompletionItemKind.Function);
+      item.insertText = new vscode.SnippetString(`${craftName}($0)`);
+      const relPath = vscode.workspace.asRelativePath(craftInfo.location.uri, true);
+      item.detail = `Craft defined in ${relPath}`;
+      const params = craftInfo.parameters.join(', ');
+      const markdown = new vscode.MarkdownString();
+      markdown.appendCodeblock(`craft ${craftName}(${params})${craftInfo.returnType ? ` gives ${craftInfo.returnType}` : ''}`, 'protohack');
+      markdown.appendMarkdown(`\nDefined in _${relPath}_`);
+      item.documentation = markdown;
       pushUnique(item);
     });
 
@@ -393,6 +614,8 @@ class ProtohackCompletionProvider implements vscode.CompletionItemProvider {
 }
 
 class ProtohackHoverProvider implements vscode.HoverProvider {
+  constructor(private readonly index: ProtohackWorkspaceIndex) {}
+
   provideHover(
     document: vscode.TextDocument,
     position: vscode.Position
@@ -402,6 +625,8 @@ class ProtohackHoverProvider implements vscode.HoverProvider {
       return null;
     }
     const word = document.getText(range);
+    const documentIntelligence = this.index.getDocumentIntelligence(document);
+    const workspaceIntelligence = this.index.getAggregateIntelligence();
 
     const native = NATIVE_FUNCTIONS.find(fn => fn.name === word);
     if (native) {
@@ -439,11 +664,78 @@ class ProtohackHoverProvider implements vscode.HoverProvider {
       return new vscode.Hover(markdown, range);
     }
 
+    const classInfo = workspaceIntelligence.classes.get(word);
+    if (classInfo) {
+      const relPath = vscode.workspace.asRelativePath(classInfo.location.uri, true);
+      const markdown = new vscode.MarkdownString();
+      markdown.appendMarkdown(`**class ${word}** (_${relPath}_)`);
+      if (classInfo.methods.size > 0) {
+        markdown.appendMarkdown('\n\n### Methods');
+        classInfo.methods.forEach(method => {
+          markdown.appendMarkdown(`\n- \`${method.signature}\``);
+        });
+      }
+      return new vscode.Hover(markdown, range);
+    }
+
+    const craftInfo = workspaceIntelligence.crafts.get(word);
+    if (craftInfo) {
+      const relPath = vscode.workspace.asRelativePath(craftInfo.location.uri, true);
+      const markdown = new vscode.MarkdownString();
+      const params = craftInfo.parameters.join(', ');
+      markdown.appendCodeblock(`craft ${craftInfo.name}(${params})${craftInfo.returnType ? ` gives ${craftInfo.returnType}` : ''}`, 'protohack');
+      markdown.appendMarkdown(`\nDefined in _${relPath}_`);
+      return new vscode.Hover(markdown, range);
+    }
+
+    const linePrefix = document.lineAt(position.line).text.slice(0, range.start.character);
+    const methodReceiverMatch = /([A-Za-z_][A-Za-z0-9_]*)\s*\.$/.exec(linePrefix);
+    if (methodReceiverMatch) {
+      const receiver = methodReceiverMatch[1];
+      let targetClass: string | undefined;
+      if (receiver === 'this') {
+        targetClass = findEnclosingClass(document, position);
+      } else {
+        targetClass = documentIntelligence.variableTypes.get(receiver);
+        if (!targetClass && documentIntelligence.classes.has(receiver)) {
+          targetClass = receiver;
+        }
+        if (!targetClass && workspaceIntelligence.classes.has(receiver)) {
+          targetClass = receiver;
+        }
+      }
+
+      if (targetClass) {
+        const methodInfo = (documentIntelligence.classMethods.get(targetClass) ?? workspaceIntelligence.classMethods.get(targetClass))?.get(word);
+        if (methodInfo) {
+          const markdown = new vscode.MarkdownString();
+          markdown.appendMarkdown(`**${methodInfo.declaringClass}.${methodInfo.name}**`);
+          markdown.appendCodeblock(methodInfo.signature, 'protohack');
+          const relPath = vscode.workspace.asRelativePath(methodInfo.location.uri, true);
+          markdown.appendMarkdown(`\nDeclared in _${relPath}_`);
+          return new vscode.Hover(markdown, range);
+        }
+      }
+    }
+
+    const variableLocation = documentIntelligence.variables.get(word);
+    if (variableLocation) {
+      const variableType = documentIntelligence.variableTypes.get(word);
+      const markdown = new vscode.MarkdownString();
+      markdown.appendMarkdown(`Variable **${word}**`);
+      if (variableType) {
+        markdown.appendMarkdown(`\nType: **${variableType}**`);
+      }
+      return new vscode.Hover(markdown, range);
+    }
+
     return null;
   }
 }
 
 class ProtohackSignatureHelpProvider implements vscode.SignatureHelpProvider {
+  constructor(private readonly index: ProtohackWorkspaceIndex) {}
+
   provideSignatureHelp(
     document: vscode.TextDocument,
     position: vscode.Position
@@ -454,47 +746,139 @@ class ProtohackSignatureHelpProvider implements vscode.SignatureHelpProvider {
       return null;
     }
     const fnName = match[1];
+    const workspaceIntelligence = this.index.getAggregateIntelligence();
     const native = NATIVE_FUNCTIONS.find(fn => fn.name === fnName);
-    if (!native) {
-      return null;
+    let signatureLabel: string | undefined;
+    let documentation: string | vscode.MarkdownString | undefined;
+    let parameters: string[] = [];
+
+    if (native) {
+      signatureLabel = native.signature;
+      documentation = native.documentation;
+      parameters = native.signature
+        .replace(/^[^(]*\(/, '')
+        .replace(/\).*/, '')
+        .split(',')
+        .map(param => param.trim())
+        .filter(param => param.length > 0);
+    } else {
+      const craftInfo = workspaceIntelligence.crafts.get(fnName);
+      if (!craftInfo) {
+        return null;
+      }
+      parameters = [...craftInfo.parameters];
+      signatureLabel = `${craftInfo.name}(${parameters.join(', ')})${craftInfo.returnType ? ` gives ${craftInfo.returnType}` : ''}`;
+      const relPath = vscode.workspace.asRelativePath(craftInfo.location.uri, true);
+      const md = new vscode.MarkdownString();
+      md.appendMarkdown(`Defined in _${relPath}_`);
+      documentation = md;
     }
 
-    const signatureInfo = new vscode.SignatureInformation(native.signature, native.documentation);
-    const params = native.signature
-      .replace(/^[^(]*\(/, '')
-      .replace(/\).*/, '')
-      .split(',')
-      .map(param => param.trim())
-      .filter(param => param.length > 0);
-
-    signatureInfo.parameters = params.map(param => new vscode.ParameterInformation(param));
+    const signatureInfo = new vscode.SignatureInformation(signatureLabel, documentation);
+    signatureInfo.parameters = parameters.map(param => new vscode.ParameterInformation(param));
 
     const signatureHelp = new vscode.SignatureHelp();
     signatureHelp.signatures = [signatureInfo];
     signatureHelp.activeSignature = 0;
     const commaCount = (line.match(/,/g) || []).length;
-    signatureHelp.activeParameter = Math.min(commaCount, signatureInfo.parameters.length - 1);
+    signatureHelp.activeParameter = Math.min(commaCount, Math.max(signatureInfo.parameters.length - 1, 0));
 
     return signatureHelp;
   }
 }
 
-export function activate(context: vscode.ExtensionContext) {
+class ProtohackDefinitionProvider implements vscode.DefinitionProvider {
+  constructor(private readonly index: ProtohackWorkspaceIndex) {}
+
+  provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Definition> {
+    const range = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
+    if (!range) {
+      return null;
+    }
+
+    const word = document.getText(range);
+    const documentIntelligence = this.index.getDocumentIntelligence(document);
+    const workspaceIntelligence = this.index.getAggregateIntelligence();
+    const locations: vscode.Location[] = [];
+
+    const classInfo = workspaceIntelligence.classes.get(word);
+    if (classInfo) {
+      locations.push(classInfo.location);
+    }
+
+    const craftInfo = workspaceIntelligence.crafts.get(word);
+    if (craftInfo) {
+      locations.push(craftInfo.location);
+    }
+
+    const variableLocation = documentIntelligence.variables.get(word);
+    if (variableLocation) {
+      locations.push(variableLocation);
+    }
+
+    const linePrefix = document.lineAt(position.line).text.slice(0, range.start.character);
+    const methodReceiverMatch = /([A-Za-z_][A-Za-z0-9_]*)\s*\.$/.exec(linePrefix);
+    if (methodReceiverMatch) {
+      const receiver = methodReceiverMatch[1];
+      let targetClass: string | undefined;
+      if (receiver === 'this') {
+        targetClass = findEnclosingClass(document, position);
+      } else {
+        targetClass = documentIntelligence.variableTypes.get(receiver);
+        if (!targetClass && documentIntelligence.classes.has(receiver)) {
+          targetClass = receiver;
+        }
+        if (!targetClass && workspaceIntelligence.classes.has(receiver)) {
+          targetClass = receiver;
+        }
+      }
+
+      if (targetClass) {
+        const methodInfo = (documentIntelligence.classMethods.get(targetClass) ?? workspaceIntelligence.classMethods.get(targetClass))?.get(word);
+        if (methodInfo) {
+          locations.push(methodInfo.location);
+        }
+      }
+    }
+
+    if (locations.length > 0) {
+      return locations;
+    }
+
+    return null;
+  }
+}
+
+export async function activate(context: vscode.ExtensionContext) {
   const languageSelector: vscode.DocumentSelector = [
     { language: 'protohack', scheme: 'file' },
     { language: 'protohack', scheme: 'untitled' }
   ];
 
+  const index = new ProtohackWorkspaceIndex();
+  try {
+    await index.initialize(context);
+  } catch (error) {
+    console.error('Failed to initialize Protohack workspace index', error);
+  }
+
   context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(languageSelector, new ProtohackCompletionProvider(), '.', '"')
+    vscode.languages.registerCompletionItemProvider(languageSelector, new ProtohackCompletionProvider(index), '.', '"')
   );
 
   context.subscriptions.push(
-    vscode.languages.registerHoverProvider(languageSelector, new ProtohackHoverProvider())
+    vscode.languages.registerHoverProvider(languageSelector, new ProtohackHoverProvider(index))
   );
 
   context.subscriptions.push(
-    vscode.languages.registerSignatureHelpProvider(languageSelector, new ProtohackSignatureHelpProvider(), '(', ',')
+    vscode.languages.registerSignatureHelpProvider(languageSelector, new ProtohackSignatureHelpProvider(index), '(', ',')
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(languageSelector, new ProtohackDefinitionProvider(index))
   );
 }
 
